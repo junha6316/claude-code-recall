@@ -1,0 +1,15 @@
+# Never commit generated timeline data or logs — they contain raw prompt text
+# (which can include tokens, passwords, and other secrets/PII).
+work-timeline/
+*.log
+.work-timeline-state.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS / editors
+.DS_Store
+*.swp
+settings.json.bak.*
