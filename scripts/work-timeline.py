@@ -166,6 +166,8 @@ def collect_sessions(window_start, window_end):
         active = False       # was there any activity (user/assistant) within the window
         first_active = None  # time of the first activity within the window
         internal = False     # exclude entirely if this is cron's own summary session
+        saw_synthetic = False   # saw a synthetic message (session limit / interrupt)
+        real_assistant = False  # had a real (non-synthetic) assistant reply in the window
 
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -201,16 +203,23 @@ def collect_sessions(window_start, window_end):
                         lt = ts.astimezone(tz)
                         if not (window_start <= lt < window_end):
                             continue
+                        msg = rec.get("message")
+                        # Synthetic messages (model=<synthetic>, e.g. "session limit
+                        # reached" / interrupts) carry no real work — don't count them
+                        # as activity, so dead 0-token sessions don't pollute the timeline.
+                        if t == "assistant" and isinstance(msg, dict) and msg.get("model") == "<synthetic>":
+                            saw_synthetic = True
+                            continue
                         active = True
                         if first_active is None or lt < first_active:
                             first_active = lt
-                        msg = rec.get("message")
                         if t == "user" and not rec.get("isMeta"):
                             if isinstance(msg, dict):
                                 text = extract_text(msg.get("content"))
                                 if is_real_prompt(text):
                                     prompts.append((lt, text))
                         elif t == "assistant":
+                            real_assistant = True
                             if isinstance(msg, dict):
                                 atext = extract_assistant_text(msg.get("content"))
                                 if atext:
@@ -219,6 +228,9 @@ def collect_sessions(window_start, window_end):
             continue
 
         if not active or internal:
+            continue
+        # Drop sessions that only got a synthetic message (limit/interrupt) with no real reply
+        if saw_synthetic and not real_assistant:
             continue
         sid = os.path.splitext(os.path.basename(path))[0]
         sessions[sid] = {
