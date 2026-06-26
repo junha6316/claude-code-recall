@@ -76,6 +76,7 @@ Below is a list of work threads. Group together threads that cover the same topi
 
 Rules:
 - Only group them when they are clearly the same task/project. Don't group just because they're in the same area (both "DB", both "deployment").
+- A ★ marks an existing group (canonical). If a thread continues that work, use the ★ slug as the canonical and put the slugs to merge in members (prefer growing the existing group).
 - The canonical for each group is the single slug that best represents the work (favor the more inclusive name / most recent activity).
 - Don't put the canonical itself in members. members are the other slugs that will be merged into the canonical.
 - If there's nothing to group, return {{"groups": []}}.
@@ -90,19 +91,34 @@ Output format:
 
 
 def is_free(e):
-    """Only threads not yet in a cluster (neither canonical nor member) are consolidation candidates."""
+    """A thread not yet in a cluster (neither canonical nor member)."""
     return not e.get("alias_of") and not e.get("aliases")
 
 
+def is_canonical(e):
+    """A canonical that already owns aliases. Becomes an absorption target for new free threads."""
+    return not e.get("alias_of") and bool(e.get("aliases"))
+
+
+def _elect(slugs, registry):
+    """Pick the canonical deterministically: most sessions → earliest started → slug order."""
+    return sorted(slugs, key=lambda s: (
+        -registry[s].get("count", 0), registry[s].get("first_active", ""), s))[0]
+
+
 def cluster(registry, dry_run):
-    free = {slug: e for slug, e in registry.items() if is_free(e)}
-    if len(free) < 2:
+    # Candidates = free (unclustered) + canonical (existing groups). Exposing canonicals lets a
+    # new near-dup free thread get absorbed into the existing group instead of spawning a parallel one.
+    cand = {slug: e for slug, e in registry.items()
+            if is_free(e) or is_canonical(e)}
+    if len(cand) < 2:
         return 0
     lines = []
-    for slug, e in sorted(free.items(), key=lambda kv: kv[1].get("last_active", ""), reverse=True):
+    for slug, e in sorted(cand.items(), key=lambda kv: kv[1].get("last_active", ""), reverse=True):
         recent = "; ".join(e.get("recent_titles", [])[-3:])
-        lines.append("- slug=%s | name=%s | project=%s | recent work: %s"
-                     % (slug, e["name"], ",".join(e.get("projects", [])) or "-",
+        mark = " ★" if is_canonical(e) else ""
+        lines.append("- slug=%s%s | name=%s | project=%s | recent work: %s"
+                     % (slug, mark, e["name"], ",".join(e.get("projects", [])) or "-",
                         th.flatten(recent, 160)))
     prompt = CLUSTER_PROMPT.format(threads="\n".join(lines))
     try:
@@ -117,24 +133,32 @@ def cluster(registry, dry_run):
     for g in groups:
         if not isinstance(g, dict):
             continue
-        # The LLM only identifies "same topic". The canonical is chosen deterministically (predictable, close to user intent):
-        # most sessions → earliest started → slug order.
         group_slugs = [g.get("canonical")] + (g.get("members") or [])
-        members_all = list(dict.fromkeys(
-            s for s in group_slugs if s in free and is_free(registry[s])))
-        if len(members_all) < 2:
+        # Re-check against live state so changes made earlier in this run are reflected.
+        live = [s for s in dict.fromkeys(group_slugs)
+                if s in registry and (is_free(registry[s]) or is_canonical(registry[s]))]
+        canons = [s for s in live if is_canonical(registry[s])]
+        frees = [s for s in live if is_free(registry[s])]
+        if not frees:
+            continue  # nothing free to absorb (existing canonicals are not merged into each other)
+        if canons:
+            winner = _elect(canons, registry)   # grow the existing group
+            to_absorb = frees
+        else:
+            winner = _elect(frees, registry)
+            to_absorb = [s for s in frees if s != winner]
+        if not to_absorb:
             continue
-        canonical = sorted(members_all, key=lambda s: (
-            -registry[s].get("count", 0), registry[s].get("first_active", ""), s))[0]
-        for m in members_all:
-            if m == canonical:
-                continue
+        existing = {a.get("slug") for a in registry[winner].get("aliases", [])}
+        for m in to_absorb:
             if dry_run:
-                print("  [dry] %s ← %s (%s)" % (canonical, m, registry[m]["name"]))
+                print("  [dry] %s ← %s (%s)" % (winner, m, registry[m]["name"]))
             else:
-                registry[m]["alias_of"] = canonical
-                registry[canonical].setdefault("aliases", []).append(
-                    {"slug": m, "name": registry[m]["name"]})
+                registry[m]["alias_of"] = winner
+                if m not in existing:
+                    registry[winner].setdefault("aliases", []).append(
+                        {"slug": m, "name": registry[m]["name"]})
+                    existing.add(m)
             linked += 1
     return linked
 
