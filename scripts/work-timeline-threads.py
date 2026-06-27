@@ -347,7 +347,7 @@ def main():
 
     tz = wt.local_tz()
     now = datetime.now(tz)
-    today = wt.hour_floor(now).replace(hour=0)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     stamp = now.strftime("%Y-%m-%d %H:%M:%S")
 
     if args.since:
