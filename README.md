@@ -25,7 +25,7 @@ This tool turns those raw transcripts into something you can actually recall:
 
 | Component | What it does |
 |---|---|
-| `work-timeline.py` | Every *N* minutes, scans transcripts, groups sessions into fixed time buckets, and writes one short LLM summary per bucket to `~/.claude/work-timeline/YYYY-MM-DD.md`. Incremental & idempotent; catches up after sleep. |
+| `work-timeline.py` | Runs from the **`Stop` hook** (after every turn) and **`SessionStart`** (catch-up). Scans transcripts, groups sessions into fixed time buckets, and writes one short LLM summary per bucket to `~/.claude/work-timeline/YYYY-MM-DD.md`. Debounced, non-blocking (detached worker), concurrency-safe, incremental & idempotent; catches up after sleep. |
 | `work-timeline-rollup.py` | Once a day, prepends a 🧠 *Daily Summary* to that day's file. |
 | `work-timeline-threads.py` | Stitches related work across days into "threads". |
 | `work-timeline-consolidate.py` | Consolidates/cleans the accumulated logs. |
@@ -37,7 +37,8 @@ so summarization runs on your own Claude account.
 
 ## Requirements
 
-- **macOS** (scheduling uses `launchd`; this is the only platform supported in v1)
+- **macOS** — the installer registers the optional daily-summary jobs via `launchd`.
+  (Ingestion itself is event-driven and platform-agnostic; a Linux installer is a follow-up.)
 - `python3` (the macOS Command Line Tools python is used if present)
 - The **`claude` CLI** on your `PATH` (needed for summaries) and `node` (the CLI is a Node app)
 
@@ -50,26 +51,28 @@ cd claude-code-recall
 ```
 
 The installer auto-detects your `python3`, `claude`, and `node` paths, copies the
-files into `~/.claude/`, registers four `launchd` jobs, and merges the recall hook
-into `~/.claude/settings.json` (existing hooks are preserved).
+files into `~/.claude/`, registers the ingestion hooks (`Stop` + `SessionStart`) and
+the recall hook into `~/.claude/settings.json` (existing hooks are preserved), sets up
+the daily-summary `launchd` jobs, and backfills the last 12h so the timeline isn't empty.
 
-You can set the cadence at install time:
+You can tune it at install time:
 
 ```bash
-./install.sh --interval-min 15 --bucket-min 15 --lang English
+./install.sh --bucket-min 15 --debounce-min 5 --lang English
 ```
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--interval-min N` | How often the scanner runs (minutes) | `15` |
-| `--bucket-min N` | Timeline bucket size (a divisor of 60) | = `--interval-min` |
+| `--bucket-min N` | Timeline bucket size (a divisor of 60) | `15` |
+| `--debounce-min N` | Min minutes between hook-triggered scans | `bucket/3` (≥2) |
 | `--lang LANG` | Language for summaries (`English`, `Korean`, …) | `English` |
 | `--no-hook` | Don't register the recall-gate hook | hook on |
 | `--yes` | Non-interactive (accept defaults) | prompts |
 
-These map to env vars (`CCRECALL_BUCKET_MINUTES`, `CCRECALL_SUMMARY_LANG`,
-`CCRECALL_CLAUDE_BIN`) baked into the launchd jobs, so you can also tweak them later
-by editing the plists in `~/Library/LaunchAgents/com.ccrecall.*`.
+These are baked as env vars (`CCRECALL_BUCKET_MINUTES`, `CCRECALL_DEBOUNCE_MINUTES`,
+`CCRECALL_SUMMARY_LANG`, `CCRECALL_CLAUDE_BIN`) into the hook command in
+`settings.json`, so you can tweak them later by editing that entry. `--interval-min`
+is still accepted as a deprecated alias for `--bucket-min`.
 
 ### Backfill past days
 
@@ -104,9 +107,12 @@ private to your machine. **Do not commit or sync it anywhere public.** This repo
 
 ## Notes
 
+- **No daemon / zero idle cost:** ingestion runs from the `Stop` hook, so it only does
+  work right after you actually use Claude Code — nothing runs when you're idle.
+- **No added latency:** the hook returns immediately and processes in a detached worker,
+  so it never blocks your session. Concurrent sessions are serialized by a file lock.
 - **Cost:** each time bucket with activity costs one `claude -p` call. With 15-minute
-  buckets that's up to ~4 calls per active hour. Increase `--bucket-min`/`--interval-min`
-  to reduce calls.
+  buckets that's up to ~4 calls per active hour. Increase `--bucket-min` to reduce calls.
 - **TCC:** data is written under `~/.claude` (not a TCC-protected folder). To surface
   it in a notes app like Obsidian, symlink the folder into your vault rather than
   changing the output path.
