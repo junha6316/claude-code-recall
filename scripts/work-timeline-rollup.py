@@ -44,6 +44,7 @@ Read it and write a "daily summary" in {lang}. Rules:
 - Start with a one-line overall takeaway (one sentence capturing today's core).
 - Then "**Key work by project**", grouping by project (or area) into 3-6 bullets. Each bullet should be concrete, focused on "what was done and why, and what the result was".
 - At the end, "**Remaining/follow-up work**" with 1-3 bullets if it can be inferred (omit if none).
+- Then a final "**Recall tags**" section (heading verbatim in English, even when the summary language is not English): one bullet per project/event above, each a comma-separated list of search aliases so this day can be found later by lexical search regardless of how the question is phrased. For every distinctive term ALWAYS include both languages: English service/tool/error names get Korean paraphrases, Korean terms get English equivalents. Expand abbreviations and add likely synonyms (e.g. `GSC, 서치콘솔, 검색 노출 급감, search impressions drop` / `OpenNext 빌드, SSR 번들, 프로덕션 배포, production deploy, 릴리스`). Tags may paraphrase, but only for events that actually appear in the log — never invent events.
 - Do not make up anything that is not in the log. Group simple lookups/checks together concisely.
 
 --- Hour-by-hour log ---
