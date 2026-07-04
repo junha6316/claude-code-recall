@@ -13,3 +13,6 @@ __pycache__/
 .DS_Store
 *.swp
 settings.json.bak.*
+
+# Eval cases are harvested from YOUR private timeline — never commit them.
+eval/cases.local.json

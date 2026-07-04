@@ -23,7 +23,7 @@ import argparse
 import importlib.util
 
 HOME = os.path.expanduser("~")
-SCRIPTS_DIR = os.path.join(HOME, ".claude", "scripts")
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))  # sibling scripts (repo checkout or installed dir alike)
 
 SUMMARY_LANG = os.environ.get("CCRECALL_SUMMARY_LANG", "English")
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# claude-code-recall installer (macOS).
+# claude-code-recall installer (macOS & Linux).
 #
 # Installs the recall skill, the work-timeline ingestion hooks (Stop + SessionStart),
-# the UserPromptSubmit recall-gate hook, and the daily synthesis jobs (launchd).
+# the UserPromptSubmit recall-gate hook, and the daily synthesis jobs
+# (launchd on macOS, cron on Linux). Honors CLAUDE_CONFIG_DIR (default ~/.claude).
 # Re-running is safe (idempotent).
 #
 # Usage:
@@ -40,7 +41,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$(uname)" == "Darwin" ]] || { echo "Error: this installer supports macOS only (v1)." >&2; exit 1; }
+OS="$(uname)"
+case "$OS" in
+  Darwin) ;;
+  Linux)  command -v crontab >/dev/null || { echo "Error: crontab not found (needed for the daily jobs on Linux)." >&2; exit 1; } ;;
+  *)      echo "Error: unsupported OS: $OS (macOS and Linux only)." >&2; exit 1 ;;
+esac
 
 # --- bucket size: flag, else --interval-min (back-compat), else prompt, else 15 ---
 if [[ -z "$BUCKET_MIN" ]]; then
@@ -64,7 +70,7 @@ fi
 
 # --- paths ---
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLAUDE_DIR="$HOME/.claude"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 SCRIPTS_DIR="$CLAUDE_DIR/scripts"
 SKILL_DIR="$CLAUDE_DIR/skills/recall"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
@@ -73,8 +79,8 @@ LOG="$SCRIPTS_DIR/work-timeline.log"
 LA_DIR="$HOME/Library/LaunchAgents"
 SETTINGS="$CLAUDE_DIR/settings.json"
 
-# --- detect python (prefer Command Line Tools python to avoid a TCC re-exec) ---
-if [[ -x /Library/Developer/CommandLineTools/usr/bin/python3 ]]; then
+# --- detect python (on macOS prefer Command Line Tools python to avoid a TCC re-exec) ---
+if [[ "$OS" == "Darwin" && -x /Library/Developer/CommandLineTools/usr/bin/python3 ]]; then
   PY="/Library/Developer/CommandLineTools/usr/bin/python3"
 else
   PY="$(command -v python3 || true)"
@@ -86,7 +92,7 @@ CLAUDE_BIN="$(command -v claude || true)"
 [[ -z "$CLAUDE_BIN" && -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
 if [[ -z "$CLAUDE_BIN" ]]; then
   echo "Warning: 'claude' CLI not found. The timeline will still record prompts, but LLM summaries"
-  echo "         will fail until claude is on PATH. Set CCRECALL_CLAUDE_BIN in the plists if needed." >&2
+  echo "         will fail until claude is on PATH. Set CCRECALL_CLAUDE_BIN in the plists/crontab if needed." >&2
 fi
 NODE_BIN=""
 NODE="$(command -v node || true)"; [[ -n "$NODE" ]] && NODE_BIN="$(dirname "$NODE")"
@@ -102,8 +108,9 @@ echo "  python        : ${PY}"
 echo "  claude        : ${CLAUDE_BIN:-<not found>}"
 echo "  recall hook   : $([[ $ENABLE_HOOK -eq 1 ]] && echo enabled || echo disabled)"
 
-# --- copy files into ~/.claude ---
-mkdir -p "$SCRIPTS_DIR" "$SKILL_DIR" "$HOOKS_DIR" "$OUTPUT_DIR" "$LA_DIR"
+# --- copy files into the config dir ---
+mkdir -p "$SCRIPTS_DIR" "$SKILL_DIR" "$HOOKS_DIR" "$OUTPUT_DIR"
+[[ "$OS" == "Darwin" ]] && mkdir -p "$LA_DIR"
 cp "$REPO_DIR"/scripts/work-timeline.py \
    "$REPO_DIR"/scripts/work-timeline-rollup.py \
    "$REPO_DIR"/scripts/work-timeline-threads.py \
@@ -140,6 +147,7 @@ emit_plist() {  # $1=label  $2=script  $3=schedule-xml
 		<key>CCRECALL_CLAUDE_BIN</key><string>${CLAUDE_BIN:-}</string>
 		<key>CCRECALL_SUMMARY_LANG</key><string>$SUMMARY_LANG</string>
 		<key>CCRECALL_BUCKET_MINUTES</key><string>$BUCKET_MIN</string>
+		<key>CLAUDE_CONFIG_DIR</key><string>$CLAUDE_DIR</string>
 	</dict>
 $3
 </dict>
@@ -149,23 +157,40 @@ EOF
 
 cal_xml() { printf '\t<key>StartCalendarInterval</key>\n\t<dict>\n\t\t<key>Hour</key><integer>0</integer>\n\t\t<key>Minute</key><integer>%s</integer>\n\t</dict>' "$1"; }
 
-# Ingestion no longer polls via launchd — it runs from the Stop/SessionStart hooks
-# below. Remove the old polling job if a previous version installed it.
-launchctl unload "$LA_DIR/com.ccrecall.work-timeline.plist" 2>/dev/null || true
-rm -f "$LA_DIR/com.ccrecall.work-timeline.plist"
+if [[ "$OS" == "Darwin" ]]; then
+  # Ingestion no longer polls via launchd — it runs from the Stop/SessionStart hooks
+  # below. Remove the old polling job if a previous version installed it.
+  launchctl unload "$LA_DIR/com.ccrecall.work-timeline.plist" 2>/dev/null || true
+  rm -f "$LA_DIR/com.ccrecall.work-timeline.plist"
 
-# Daily synthesis jobs stay on launchd (run once a day, off the hot path).
-emit_plist "com.ccrecall.work-timeline-rollup"      "work-timeline-rollup.py"      "$(cal_xml 30)"
-emit_plist "com.ccrecall.work-timeline-threads"     "work-timeline-threads.py"     "$(cal_xml 40)"
-emit_plist "com.ccrecall.work-timeline-consolidate" "work-timeline-consolidate.py" "$(cal_xml 50)"
+  # Daily synthesis jobs stay on launchd (run once a day, off the hot path).
+  emit_plist "com.ccrecall.work-timeline-rollup"      "work-timeline-rollup.py"      "$(cal_xml 30)"
+  emit_plist "com.ccrecall.work-timeline-threads"     "work-timeline-threads.py"     "$(cal_xml 40)"
+  emit_plist "com.ccrecall.work-timeline-consolidate" "work-timeline-consolidate.py" "$(cal_xml 50)"
 
-# --- (re)load launchd jobs ---
-for label in com.ccrecall.work-timeline-rollup \
-             com.ccrecall.work-timeline-threads com.ccrecall.work-timeline-consolidate; do
-  launchctl unload "$LA_DIR/$label.plist" 2>/dev/null || true
-  launchctl load   "$LA_DIR/$label.plist"
-done
-echo "launchd daily jobs loaded."
+  # (re)load launchd jobs
+  for label in com.ccrecall.work-timeline-rollup \
+               com.ccrecall.work-timeline-threads com.ccrecall.work-timeline-consolidate; do
+    launchctl unload "$LA_DIR/$label.plist" 2>/dev/null || true
+    launchctl load   "$LA_DIR/$label.plist"
+  done
+  echo "launchd daily jobs loaded."
+else
+  # Linux: daily synthesis jobs via cron. Lines are tagged "# ccrecall" so
+  # re-install replaces them idempotently; other crontab entries are untouched.
+  CRON_ENV="HOME=$HOME PATH=$PATH_ENV CLAUDE_CONFIG_DIR='$CLAUDE_DIR' CCRECALL_SUMMARY_LANG='$SUMMARY_LANG' CCRECALL_BUCKET_MINUTES=$BUCKET_MIN"
+  [[ -n "$CLAUDE_BIN" ]] && CRON_ENV="$CRON_ENV CCRECALL_CLAUDE_BIN='$CLAUDE_BIN'"
+  CRON_TMP="$(mktemp)"
+  ( crontab -l 2>/dev/null | grep -v '# ccrecall$' ) > "$CRON_TMP" || true
+  {
+    echo "30 0 * * * $CRON_ENV $PY $SCRIPTS_DIR/work-timeline-rollup.py >> $LOG 2>&1 # ccrecall"
+    echo "40 0 * * * $CRON_ENV $PY $SCRIPTS_DIR/work-timeline-threads.py >> $LOG 2>&1 # ccrecall"
+    echo "50 0 * * * $CRON_ENV $PY $SCRIPTS_DIR/work-timeline-consolidate.py >> $LOG 2>&1 # ccrecall"
+  } >> "$CRON_TMP"
+  crontab "$CRON_TMP"
+  rm -f "$CRON_TMP"
+  echo "cron daily jobs registered (crontab, tagged '# ccrecall')."
+fi
 
 # --- merge hooks into settings.json (preserves existing hooks) ---
 # Ingestion runs from Stop + SessionStart (async = non-blocking). The recall-gate
@@ -175,11 +200,11 @@ echo "launchd daily jobs loaded."
 # Portuguese") doesn't split into a stray command when Claude Code runs the hook.
 # (PY / SCRIPTS_DIR live under fixed space-free paths and are left unquoted so the
 # "work-timeline.py --hook" idempotency/uninstall matcher keeps matching.)
-HOOK_ENV="CCRECALL_BUCKET_MINUTES=$BUCKET_MIN CCRECALL_SUMMARY_LANG='$SUMMARY_LANG' CCRECALL_DEBOUNCE_MINUTES=$DEBOUNCE_MIN"
+HOOK_ENV="CCRECALL_BUCKET_MINUTES=$BUCKET_MIN CCRECALL_SUMMARY_LANG='$SUMMARY_LANG' CCRECALL_DEBOUNCE_MINUTES=$DEBOUNCE_MIN CLAUDE_CONFIG_DIR='$CLAUDE_DIR'"
 [[ -n "$CLAUDE_BIN" ]] && HOOK_ENV="$HOOK_ENV CCRECALL_CLAUDE_BIN='$CLAUDE_BIN'"
 TICK_CMD="$HOOK_ENV $PY $SCRIPTS_DIR/work-timeline.py --hook"
 RECALL_CMD=""
-[[ $ENABLE_HOOK -eq 1 ]] && RECALL_CMD="python3 ~/.claude/hooks/recall-gate.py 2>/dev/null || true"
+[[ $ENABLE_HOOK -eq 1 ]] && RECALL_CMD="python3 $HOOKS_DIR/recall-gate.py 2>/dev/null || true"
 
 [[ -f "$SETTINGS" ]] && cp "$SETTINGS" "$SETTINGS.bak.$(date +%s 2>/dev/null || echo bak)" 2>/dev/null || true
 "$PY" - "$SETTINGS" "$TICK_CMD" "$RECALL_CMD" <<'PYEOF'
@@ -226,7 +251,7 @@ PYEOF
 
 # --- backfill recent activity so the timeline isn't empty on first use (no LLM = fast/free) ---
 echo "Backfilling the last 12h (no LLM)…"
-CCRECALL_BUCKET_MINUTES="$BUCKET_MIN" "$PY" "$SCRIPTS_DIR/work-timeline.py" --backfill 12 --no-llm || true
+CCRECALL_BUCKET_MINUTES="$BUCKET_MIN" CLAUDE_CONFIG_DIR="$CLAUDE_DIR" "$PY" "$SCRIPTS_DIR/work-timeline.py" --backfill 12 --no-llm || true
 
 cat <<EOF
 

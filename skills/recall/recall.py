@@ -21,18 +21,75 @@ import argparse
 from datetime import datetime, timedelta
 
 HOME = os.path.expanduser("~")
-TIMELINE_DIR = os.path.join(HOME, ".claude", "work-timeline")
+# Honor CLAUDE_CONFIG_DIR (custom Claude Code config dirs); default ~/.claude.
+CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+TIMELINE_DIR = os.path.join(CONFIG_DIR, "work-timeline")
 THREADS_DIR = os.path.join(TIMELINE_DIR, "threads")
-PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
+PROJECTS_DIR = os.path.join(CONFIG_DIR, "projects")
 
 LINE_TRUNC = 200          # max length when displaying a matched line
 MAX_LINES_PER_HIT = 8     # number of matched lines to show per block
 DEFAULT_LIMIT = 15
 
 
+# --- query tokenization -------------------------------------------------
+# Full-sentence questions should degrade gracefully into keyword search, so
+# terms_of() strips punctuation/markup, drops query-framing stopwords, and
+# trims trailing Korean particles (josa). Stripped stems still match via the
+# substring scorer (e.g. "게이트웨" ⊂ "게이트웨이").
+
+MAX_TERMS = 6
+
+# Query-framing words that carry no search signal (recall triggers, pronouns,
+# common verb stems). Latin tokens are compared lowercase.
+STOP = {
+    # Korean
+    "기억해", "기억", "기억나", "전에", "예전", "지난번", "저번", "그때", "언제",
+    "했지", "했어", "했던", "했었", "하던", "만들던", "만들던거", "만들", "하던거",
+    "그거", "그게", "이거", "저거", "내가", "우리", "그", "좀", "해줘", "했나",
+    "뭐", "뭐였지", "어떻게", "왜", "거", "것", "건", "때", "줘", "해", "나", "수",
+    "있어", "있나", "없어", "적", "일", "관련",
+    # English
+    "the", "a", "an", "when", "did", "do", "how", "what", "was", "were", "is",
+    "are", "i", "we", "you", "that", "this", "it", "there", "about", "for",
+}
+
+# Trailing Korean particles/endings to strip from Korean tokens.
+JOSA = re.compile(
+    r"(을|를|이|가|은|는|에|의|로|으로|도|만|와|과|랑|이랑|에서|까지|부터"
+    r"|던거|던|거|게|야|냐|니|네|좀|했|하)+$"
+)
+
+
 def terms_of(query):
-    """Turn a query into search-term tokens. Split on whitespace, lowercase (Latin), drop empty tokens."""
-    return [t.lower() for t in query.split() if t.strip()]
+    """Turn a query into search-term tokens (keyword extraction, max MAX_TERMS).
+    Falls back to a plain whitespace split if extraction leaves nothing."""
+    raw = re.split(r"[\s,.;:!?()\[\]{}<>'\"`~/\\|=&]+", query)
+    out, seen = [], set()
+
+    def add(tok):
+        if tok and tok not in seen:
+            seen.add(tok)
+            out.append(tok)
+
+    for tok in raw:
+        if not tok:
+            continue
+        low = tok.lower()
+        # Latin/alphanumeric tokens (service names, error strings) pass as-is.
+        if re.fullmatch(r"[a-z0-9_+#.-]{2,}", low):
+            if low not in STOP:
+                add(low)
+            continue
+        # Korean tokens: strip trailing particles, keep 2+ char stems.
+        stem = JOSA.sub("", tok)
+        if len(stem) < 2 or stem in STOP or tok in STOP:
+            continue
+        add(stem.lower())
+
+    if not out:  # all tokens were stopwords/junk — fall back to the naive split
+        return [t.lower() for t in query.split() if t.strip()][:MAX_TERMS]
+    return out[:MAX_TERMS]
 
 
 def score(text_lower, terms):

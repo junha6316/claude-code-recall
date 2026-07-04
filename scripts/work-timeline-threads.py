@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 HOME = os.path.expanduser("~")
-SCRIPTS_DIR = os.path.join(HOME, ".claude", "scripts")
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))  # sibling scripts (repo checkout or installed dir alike)
 
 # Reuse work-timeline.py helpers (hyphenated filename -> importlib)
 _spec = importlib.util.spec_from_file_location(

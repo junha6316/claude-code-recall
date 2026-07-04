@@ -37,9 +37,9 @@ so summarization runs on your own Claude account.
 
 ## Requirements
 
-- **macOS** — the installer registers the optional daily-summary jobs via `launchd`.
-  (Ingestion itself is event-driven and platform-agnostic; a Linux installer is a follow-up.)
-- `python3` (the macOS Command Line Tools python is used if present)
+- **macOS or Linux** — daily-summary jobs run via `launchd` (macOS) or `cron` (Linux).
+  Ingestion itself is event-driven (Claude Code hooks) and platform-agnostic.
+- `python3` (stdlib only — no packages to install; on macOS the Command Line Tools python is used if present)
 - The **`claude` CLI** on your `PATH` (needed for summaries) and `node` (the CLI is a Node app)
 
 ## Install
@@ -51,9 +51,11 @@ cd claude-code-recall
 ```
 
 The installer auto-detects your `python3`, `claude`, and `node` paths, copies the
-files into `~/.claude/`, registers the ingestion hooks (`Stop` + `SessionStart`) and
-the recall hook into `~/.claude/settings.json` (existing hooks are preserved), sets up
-the daily-summary `launchd` jobs, and backfills the last 12h so the timeline isn't empty.
+files into your Claude config dir (`$CLAUDE_CONFIG_DIR` if set, else `~/.claude`),
+registers the ingestion hooks (`Stop` + `SessionStart`) and the recall hook into
+`settings.json` (existing hooks are preserved), sets up the daily-summary jobs
+(`launchd` on macOS, tagged `crontab` entries on Linux), and backfills the last
+12h so the timeline isn't empty.
 
 You can tune it at install time:
 
@@ -98,6 +100,22 @@ other secrets/PII that appeared in your conversations. `~/.claude/work-timeline/
 private to your machine. **Do not commit or sync it anywhere public.** This repo's
 `.gitignore` already excludes timeline data, logs, and state files.
 
+## Measuring search quality
+
+`eval/run-eval.py` is a retrieval-quality regression harness: it harvests grounded
+question/answer cases **from your own timeline** (via `claude -p`, four difficulty
+tiers + negative controls), answers each blindly with the recall tool itself, and
+judges the results against ground truth.
+
+```bash
+python3 eval/run-eval.py --harvest --run   # first time
+python3 eval/run-eval.py                   # re-run after changes (regression)
+```
+
+Measured 2026-07-04 (96 cases, bilingual *Recall tags* in daily summaries):
+**hit@1 96% · top-3 99% · false positives 0/12**. Cases live in
+`eval/cases.local.json` (gitignored — they contain your private work data).
+
 ## Uninstall
 
 ```bash
@@ -113,6 +131,9 @@ private to your machine. **Do not commit or sync it anywhere public.** This repo
   so it never blocks your session. Concurrent sessions are serialized by a file lock.
 - **Cost:** each time bucket with activity costs one `claude -p` call. With 15-minute
   buckets that's up to ~4 calls per active hour. Increase `--bucket-min` to reduce calls.
+  Note these calls run on **your Claude account** and count toward its rolling usage
+  limits like any other session — if you routinely brush against your plan's limits,
+  prefer a larger `--bucket-min` (e.g. 30).
 - **TCC:** data is written under `~/.claude` (not a TCC-protected folder). To surface
   it in a notes app like Obsidian, symlink the folder into your vault rather than
   changing the output path.

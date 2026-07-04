@@ -20,7 +20,7 @@ import importlib.util
 from datetime import datetime
 
 HOME = os.path.expanduser("~")
-SCRIPTS_DIR = os.path.join(HOME, ".claude", "scripts")
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))  # sibling scripts (repo checkout or installed dir alike)
 CLAUDE_BIN = (os.environ.get("CCRECALL_CLAUDE_BIN")
               or shutil.which("claude")
               or os.path.join(HOME, ".local", "bin", "claude"))

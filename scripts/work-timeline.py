@@ -26,11 +26,13 @@ except ImportError:
     fcntl = None
 
 HOME = os.path.expanduser("~")
-PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
-# Actual storage lives under a non-TCC-protected path (~/.claude). The Obsidian vault holds a symlink to this folder.
-OUTPUT_DIR = os.path.join(HOME, ".claude", "work-timeline")
-STATE_FILE = os.path.join(HOME, ".claude", "scripts", ".work-timeline-state.json")
-LOCK_FILE = os.path.join(HOME, ".claude", "scripts", ".work-timeline.lock")
+# Honor CLAUDE_CONFIG_DIR (custom Claude Code config dirs); default ~/.claude.
+CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+PROJECTS_DIR = os.path.join(CONFIG_DIR, "projects")
+# Actual storage lives under a non-TCC-protected path (the config dir). The Obsidian vault holds a symlink to this folder.
+OUTPUT_DIR = os.path.join(CONFIG_DIR, "work-timeline")
+STATE_FILE = os.path.join(CONFIG_DIR, "scripts", ".work-timeline-state.json")
+LOCK_FILE = os.path.join(CONFIG_DIR, "scripts", ".work-timeline.lock")
 
 MAX_BACKFILL_HOURS = 24       # prevent a flood on the first run when state is too stale
 PROMPT_TRUNC = 140            # max display length for a prompt

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# claude-code-recall uninstaller (macOS).
+# claude-code-recall uninstaller (macOS & Linux).
 #
-# Removes the launchd jobs, the installed scripts/skill/hook, and the recall hook
-# entry from settings.json. By default it KEEPS your timeline data.
+# Removes the daily jobs (launchd on macOS, cron on Linux), the installed
+# scripts/skill/hook, and the recall hook entry from settings.json.
+# Honors CLAUDE_CONFIG_DIR (default ~/.claude). By default it KEEPS your timeline data.
 #
 # Usage:
 #   ./uninstall.sh [--purge] [--yes]
-#     --purge   Also delete the timeline data (~/.claude/work-timeline).
+#     --purge   Also delete the timeline data ($CONFIG/work-timeline).
 #     --yes,-y  Don't prompt for confirmation.
 #
 set -euo pipefail
@@ -21,7 +22,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CLAUDE_DIR="$HOME/.claude"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 SCRIPTS_DIR="$CLAUDE_DIR/scripts"
 SKILL_DIR="$CLAUDE_DIR/skills/recall"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
@@ -34,12 +35,20 @@ if [[ $ASSUME_YES -eq 0 && -t 0 ]]; then
   [[ "${ans:-}" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
 fi
 
-for label in com.ccrecall.work-timeline com.ccrecall.work-timeline-rollup \
-             com.ccrecall.work-timeline-threads com.ccrecall.work-timeline-consolidate; do
-  launchctl unload "$LA_DIR/$label.plist" 2>/dev/null || true
-  rm -f "$LA_DIR/$label.plist"
-done
-echo "launchd jobs removed."
+if [[ "$(uname)" == "Darwin" ]]; then
+  for label in com.ccrecall.work-timeline com.ccrecall.work-timeline-rollup \
+               com.ccrecall.work-timeline-threads com.ccrecall.work-timeline-consolidate; do
+    launchctl unload "$LA_DIR/$label.plist" 2>/dev/null || true
+    rm -f "$LA_DIR/$label.plist"
+  done
+  echo "launchd jobs removed."
+elif command -v crontab >/dev/null; then
+  CRON_TMP="$(mktemp)"
+  ( crontab -l 2>/dev/null | grep -v '# ccrecall$' ) > "$CRON_TMP" || true
+  crontab "$CRON_TMP" 2>/dev/null || true
+  rm -f "$CRON_TMP"
+  echo "cron jobs removed."
+fi
 
 rm -f "$SCRIPTS_DIR"/work-timeline.py "$SCRIPTS_DIR"/work-timeline-rollup.py \
       "$SCRIPTS_DIR"/work-timeline-threads.py "$SCRIPTS_DIR"/work-timeline-consolidate.py \

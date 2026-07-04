@@ -66,8 +66,23 @@ JOSA = re.compile(
 )
 
 
+# Prompts that are actually system/harness wrappers, not the user asking something
+# (task notifications, command output, reminders). Never treat these as recall
+# questions — their XML-ish tokens would otherwise become garbage keywords.
+SYSTEM_WRAPPER_PREFIXES = (
+    "<task-notification",
+    "<system-reminder",
+    "<local-command-caveat",
+    "<command-name",
+    "<bash-input",
+    "<bash-stdout",
+    "[Request interrupted",
+    "Caveat:",
+)
+
+
 def extract_keywords(prompt):
-    raw = re.split(r"[\s,.;:!?()\[\]{}'\"`~/\\|]+", prompt)
+    raw = re.split(r"[\s,.;:!?()\[\]{}<>'\"`~/\\|=&]+", prompt)
     kws = []
     for tok in raw:
         if not tok:
@@ -98,6 +113,8 @@ def run(payload):
     prompt = payload.get("prompt") or payload.get("user_prompt") or ""
     if not prompt.strip() or not TRIG_RE.search(prompt):
         return None
+    if prompt.lstrip().startswith(SYSTEM_WRAPPER_PREFIXES):
+        return None  # harness-injected content, not a user question
     kws = extract_keywords(prompt)
     if not kws:
         return None
