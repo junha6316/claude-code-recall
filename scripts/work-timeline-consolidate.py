@@ -41,8 +41,13 @@ wt = _load("work_timeline", "work-timeline.py")
 th = _load("work_timeline_threads", "work-timeline-threads.py")
 
 SYNTH_MIN_SESSIONS = 2     # for a single-session thread the entry itself is the state → skip synthesis
+SYNTH_MAX_LINES = 150      # cap on record lines fed to the synthesis prompt (most recent kept)
+DIGEST_TRUNC = 300         # length cap for one daily-log excerpt line
 ENTRY_RE = re.compile(r"^- `(\d{2}:\d{2})` (.+?)\s*·([0-9a-f]{8})\s*$")
 DATE_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
+ENTRY_PROJ_RE = re.compile(r"^\[([^\]]+)\]")
+DAY_BLOCK_RE = re.compile(r"^## (\d{2}:\d{2})–\d{2}:\d{2}\s*$")
+DAY_DIGEST_RE = re.compile(r"^- \*\*(.+?)\*\*(?: · `[^`]+`)? — (.+)$")
 
 
 def thread_file(slug):
@@ -67,6 +72,43 @@ def read_entries(slug):
         if e and cur:
             out.append((cur, e.group(1), e.group(2).strip()))
     return sorted(out)
+
+
+_day_digest_cache = {}
+
+
+def day_digests(date):
+    """Return (hm, project, digest) list from the daily timeline md.
+
+    A thread entry is a single line per session (headline from the first prompt),
+    so for a session that starts in the morning and runs all day, everything after
+    the first prompt is invisible to synthesis. The per-time-block daily-log
+    digests fill that gap."""
+    if date in _day_digest_cache:
+        return _day_digest_cache[date]
+    path = os.path.join(wt.OUTPUT_DIR, "%s.md" % date)
+    out = []
+    if os.path.exists(path):
+        cur_hm = None
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                m = DAY_BLOCK_RE.match(line)
+                if m:
+                    cur_hm = m.group(1)
+                    continue
+                if cur_hm is None:
+                    continue  # skip everything outside time blocks (e.g. the daily summary)
+                d = DAY_DIGEST_RE.match(line.rstrip("\n"))
+                if d:
+                    proj = d.group(1).split(" · ")[0].strip()
+                    out.append((cur_hm, proj, d.group(2).strip()))
+    _day_digest_cache[date] = out
+    return out
+
+
+def entry_project(text):
+    m = ENTRY_PROJ_RE.match(text)
+    return m.group(1).split(" · ")[0].strip() if m else None
 
 
 # ---------- Stage 1: consolidation (coreference) ----------
@@ -172,6 +214,7 @@ Rules:
 - Focus on what this work is now about and what the current decision/progress state is.
 - If a past fact was changed by a later record, state it explicitly as "was ~ but is now ~" (don't write old facts as if they were current).
 - If records contradict each other, make clear which one is the most recent.
+- Lines marked "(daily-log)" are excerpts from the same day's work journal for the same project and may include unrelated work. Only use what is relevant to this thread.
 - Within 5-8 lines, body only, no heading/title. Don't make up anything not in the log.
 
 [Work: {name}]
@@ -199,12 +242,23 @@ def synthesize(registry, dry_run):
             continue  # no change
 
         entries = []
+        date_projects = {}   # date -> {project}, for matching daily-log excerpts
         for m in members:
             for date, hm, text in read_entries(m):
                 entries.append("%s %s | %s" % (date, hm, text))
+                proj = entry_project(text)
+                if proj:
+                    date_projects.setdefault(date, set()).add(proj)
         if not entries:
             continue
-        entries.sort()
+        # Thread entries alone (one first-prompt line per session) lose everything a
+        # long-running session did later in the day; add the matching daily-log digests.
+        for date, projs in date_projects.items():
+            for hm, proj, dig in day_digests(date):
+                if proj in projs:
+                    entries.append("%s %s | (daily-log/%s) %s"
+                                   % (date, hm, proj, th.flatten(dig, DIGEST_TRUNC)))
+        entries = sorted(set(entries))[-SYNTH_MAX_LINES:]
         prompt = SYNTH_PROMPT.format(lang=SUMMARY_LANG, name=e["name"], entries="\n".join(entries))
         if dry_run:
             print("  [dry] synth %s (%d members, %d records)" % (slug, len(members), len(entries)))

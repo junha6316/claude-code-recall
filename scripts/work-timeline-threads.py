@@ -275,8 +275,16 @@ def update_entry(e, s, sid, day_str):
 def format_line(s, sid):
     hm = s["first_active"].strftime("%H:%M")
     br = (" · `%s`" % s["branch"]) if s.get("branch") and s["branch"] != "HEAD" else ""
-    return "- `%s` [%s%s] %s  ·%s" % (
-        hm, s["project"], br, flatten(session_headline(s), HEADLINE_TRUNC), sid[:8])
+    head = flatten(session_headline(s), HEADLINE_TRUNC)
+    # The headline comes from the first prompt, so the later part of a long session
+    # is invisible. Append the last input as a hint of how far the session went.
+    tail = ""
+    prompts = s.get("prompts") or []
+    if len(prompts) > 1:
+        last = flatten(prompts[-1][1], 80)
+        if last and last not in head:
+            tail = " (last input: %s)" % last
+    return "- `%s` [%s%s] %s%s  ·%s" % (hm, s["project"], br, head, tail, sid[:8])
 
 
 THREAD_DATE_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
