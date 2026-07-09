@@ -54,6 +54,9 @@ rm -f "$SCRIPTS_DIR"/work-timeline.py "$SCRIPTS_DIR"/work-timeline-rollup.py \
       "$SCRIPTS_DIR"/work-timeline-threads.py "$SCRIPTS_DIR"/work-timeline-consolidate.py \
       "$SCRIPTS_DIR"/.work-timeline-state.json "$SCRIPTS_DIR"/.work-timeline.lock \
       "$SCRIPTS_DIR"/.work-timeline-state.json.lock "$SCRIPTS_DIR"/.work-timeline-state.json.tmp
+rm -f "$SCRIPTS_DIR"/check-update.sh "$SCRIPTS_DIR"/.ccrecall-version \
+      "$SCRIPTS_DIR"/.ccrecall-latest "$SCRIPTS_DIR"/.ccrecall-update-check \
+      "$SCRIPTS_DIR"/.ccrecall-config
 rm -f "$HOOKS_DIR"/recall-gate.py
 rm -rf "$SKILL_DIR"
 echo "scripts / skill / hook removed."
@@ -72,7 +75,7 @@ except Exception:
 hooks = data.get("hooks")
 if not isinstance(hooks, dict):
     sys.exit(0)
-OURS = ("recall-gate.py", "work-timeline.py --hook")
+OURS = ("recall-gate.py", "work-timeline.py --hook", "check-update.sh")
 changed = False
 for event in ("UserPromptSubmit", "Stop", "SessionStart"):
     groups = hooks.get(event)

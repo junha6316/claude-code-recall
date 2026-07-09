@@ -116,6 +116,7 @@ cp "$REPO_DIR"/scripts/work-timeline.py \
    "$REPO_DIR"/scripts/work-timeline-threads.py \
    "$REPO_DIR"/scripts/work-timeline-consolidate.py "$SCRIPTS_DIR"/
 cp "$REPO_DIR"/scripts/recall-gate.py "$HOOKS_DIR"/
+cp "$REPO_DIR"/scripts/check-update.sh "$SCRIPTS_DIR"/
 cp "$REPO_DIR"/skills/recall/recall.py "$REPO_DIR"/skills/recall/SKILL.md "$SKILL_DIR"/
 
 # --- generate launchd plists ---
@@ -205,11 +206,15 @@ HOOK_ENV="CCRECALL_BUCKET_MINUTES=$BUCKET_MIN CCRECALL_SUMMARY_LANG='$SUMMARY_LA
 TICK_CMD="$HOOK_ENV $PY $SCRIPTS_DIR/work-timeline.py --hook"
 RECALL_CMD=""
 [[ $ENABLE_HOOK -eq 1 ]] && RECALL_CMD="python3 $HOOKS_DIR/recall-gate.py 2>/dev/null || true"
+# Update checker (notify-only): --refresh caches the latest release tag (async,
+# network, throttled to daily); --notify surfaces it to the user (sync, instant).
+CHECK_CMD="bash $SCRIPTS_DIR/check-update.sh --refresh"
+NOTIFY_CMD="bash $SCRIPTS_DIR/check-update.sh --notify 2>/dev/null || true"
 
 [[ -f "$SETTINGS" ]] && cp "$SETTINGS" "$SETTINGS.bak.$(date +%s 2>/dev/null || echo bak)" 2>/dev/null || true
-"$PY" - "$SETTINGS" "$TICK_CMD" "$RECALL_CMD" <<'PYEOF'
+"$PY" - "$SETTINGS" "$TICK_CMD" "$RECALL_CMD" "$CHECK_CMD" "$NOTIFY_CMD" <<'PYEOF'
 import json, sys
-path, tick_cmd, recall_cmd = sys.argv[1], sys.argv[2], sys.argv[3]
+path, tick_cmd, recall_cmd, check_cmd, notify_cmd = sys.argv[1:6]
 try:
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
@@ -239,6 +244,15 @@ if recall_cmd:
                                "statusMessage": "recall: checking past work..."}]})
         changed = True
 
+# Update checker on SessionStart: async refresh (network) + sync notify (instant).
+ss = hooks.setdefault("SessionStart", [])
+if not has("SessionStart", "check-update.sh --refresh"):
+    ss.append({"hooks": [{"type": "command", "command": check_cmd, "async": True}]})
+    changed = True
+if not has("SessionStart", "check-update.sh --notify"):
+    ss.append({"hooks": [{"type": "command", "command": notify_cmd}]})
+    changed = True
+
 if changed:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -248,6 +262,18 @@ if changed:
 else:
     print("  settings.json: hooks already present (skipped).")
 PYEOF
+
+# --- record installed version + chosen options (read by check-update.sh) ---
+CCRECALL_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$REPO_DIR/.claude-plugin/plugin.json" 2>/dev/null | head -1 || true)"
+CCRECALL_VERSION="${CCRECALL_VERSION:-0.0.0}"
+printf '%s\n' "$CCRECALL_VERSION" > "$SCRIPTS_DIR/.ccrecall-version"
+{
+  echo "VERSION=$CCRECALL_VERSION"
+  echo "SUMMARY_LANG=$SUMMARY_LANG"
+  echo "BUCKET_MIN=$BUCKET_MIN"
+  echo "DEBOUNCE_MIN=$DEBOUNCE_MIN"
+  echo "ENABLE_HOOK=$ENABLE_HOOK"
+} > "$SCRIPTS_DIR/.ccrecall-config"
 
 # --- backfill recent activity so the timeline isn't empty on first use (no LLM = fast/free) ---
 echo "Backfilling the last 12h (no LLM)…"
