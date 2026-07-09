@@ -151,6 +151,16 @@ Measured 2026-07-04 (96 cases, bilingual *Recall tags* in daily summaries):
 ./uninstall.sh --purge   # also deletes ~/.claude/work-timeline
 ```
 
+## Roadmap
+
+- **Multi-device support.** Today ingestion and recall are per-machine: each device
+  builds its own timeline, threads, and registry from its local
+  `~/.claude/projects`, so recall on one machine can't find work done on another.
+  The goal is to merge timelines across a user's devices — stitching threads and
+  reconciling the per-device cursor/registry — so recall covers all of them.
+  Constraint: the timeline holds raw prompt text (secrets/PII), so any sync must be
+  **private and user-controlled** (never a public remote); see *Privacy & secrets*.
+
 ## Notes
 
 - **No daemon / zero idle cost:** ingestion runs from the `Stop` hook, so it only does
