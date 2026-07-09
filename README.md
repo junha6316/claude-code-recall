@@ -83,6 +83,34 @@ python3 ~/.claude/scripts/work-timeline.py --backfill 12   # last 12 hours
 python3 ~/.claude/scripts/work-timeline.py --date 2026-06-25
 ```
 
+## Updating
+
+The installer registers a lightweight update checker on `SessionStart`. Once a day
+it checks the latest GitHub **release** tag; when a newer one exists it tells you at
+the start of a session, with a ready-to-run update command that keeps your original
+install options (language, bucket size, etc.):
+
+```bash
+git -C ~/Projects/claude-code-recall pull && ~/Projects/claude-code-recall/install.sh
+```
+
+It **only notifies** — it never downloads or applies anything on its own, so remote
+code is never executed without your action. Re-running `install.sh` is the update
+(it's idempotent and backs up `settings.json` first). The check is network-only once
+per day, fails open (a failed check never blocks a session), and stays quiet until
+you publish a release, so it does nothing on `main`-only checkouts.
+
+### Releasing (maintainers)
+
+The version in `.claude-plugin/plugin.json` is the source of truth. To ship an update
+to everyone: bump that `version`, commit, then tag and publish a matching release.
+
+```bash
+gh release create v0.2.0 --title v0.2.0 --generate-notes
+```
+
+Only tagged releases reach installs — pushing to `main` alone does not notify anyone.
+
 ## Using recall
 
 Just ask Claude naturally — *"when did I work on X?"*, *"what was that error last
