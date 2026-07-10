@@ -76,6 +76,9 @@ These are baked as env vars (`CCRECALL_BUCKET_MINUTES`, `CCRECALL_DEBOUNCE_MINUT
 `settings.json`, so you can tweak them later by editing that entry. `--interval-min`
 is still accepted as a deprecated alias for `--bucket-min`.
 
+`CCRECALL_SUMMARY_MODEL` sets the model for the headless summary/classification
+calls (default `claude-sonnet-5`); set it empty to fall back to the CLI default.
+
 ### Backfill past days
 
 ```bash

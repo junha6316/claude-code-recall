@@ -51,8 +51,12 @@ CLAUDE_BIN = (os.environ.get("CCRECALL_CLAUDE_BIN")
               or shutil.which("claude")
               or os.path.join(HOME, ".local", "bin", "claude"))
 CLAUDE_TIMEOUT = 180          # seconds
-MAX_ASSISTANT_SNIPPETS = 5    # number of assistant responses per session to feed into the summary input
-ASSISTANT_TRUNC = 220         # max length of a single assistant response (for summary input)
+# Model for the headless summary/classification calls. Sonnet-5 by default for
+# better conclusion extraction; override with CCRECALL_SUMMARY_MODEL (empty = CLI default).
+SUMMARY_MODEL = os.environ.get("CCRECALL_SUMMARY_MODEL", "claude-sonnet-5")
+MAX_ASSISTANT_SNIPPETS = 8    # number of assistant responses per session to feed into the summary input
+ASSISTANT_TRUNC = 500         # max length of a single assistant response (for summary input)
+ASSISTANT_TAIL_KEEP = 3       # always keep the last N assistant responses (conclusions land at the end)
 DIGEST_PROMPT_TRUNC = 160     # user prompt length for summary input
 
 # Marker identifying cron's own headless claude -p summary sessions. Sessions containing this marker are excluded entirely (self-noise).
@@ -271,8 +275,11 @@ def run_claude(prompt, timeout=CLAUDE_TIMEOUT):
         HOME, ".local", "share", "mise", "installs", "node", "*", "bin")))
     if node_bins:
         env["PATH"] = node_bins[-1] + os.pathsep + env.get("PATH", "/usr/bin:/bin")
+    cmd = [CLAUDE_BIN, "-p"]
+    if SUMMARY_MODEL:
+        cmd += ["--model", SUMMARY_MODEL]
     proc = subprocess.run(
-        [CLAUDE_BIN, "-p"],
+        cmd,
         input=prompt, capture_output=True, text=True,
         timeout=timeout, env=env,
     )
@@ -299,6 +306,33 @@ def _flatten(text, limit):
     return one[:limit] + "…" if len(one) > limit else one
 
 
+# Assistant snippets containing these signals tend to carry the conclusion/decision
+# rather than exploratory chatter, so they are prioritized for the summary input.
+DECISION_SIGNALS = (
+    "확정", "결론", "기각", "결정", "원인", "배포", "완료", "해결", "실패",
+    "정리하면", "요약하면", "따라서",
+    "decided", "confirmed", "ruled out", "root cause", "deployed",
+    "conclusion", "in summary", "therefore", "fixed",
+)
+
+
+def select_assistant_snippets(assistant_texts, limit, tail_keep):
+    """Pick the assistant responses most likely to hold conclusions.
+    Always keep the last `tail_keep` (conclusions land at the end), then fill the
+    remaining slots with earlier responses carrying a decision signal (most recent
+    first). Chronological order is preserved in the returned list."""
+    n = len(assistant_texts)
+    if n <= limit:
+        return list(assistant_texts)
+    keep = set(range(max(0, n - tail_keep), n))
+    for i in range(n - tail_keep - 1, -1, -1):
+        if len(keep) >= limit:
+            break
+        if any(sig in assistant_texts[i][1].lower() for sig in DECISION_SIGNALS):
+            keep.add(i)
+    return [assistant_texts[i] for i in sorted(keep)]
+
+
 def build_hour_digest(ordered):
     """ordered: [(sid, session)] (sorted by first_active). Builds the summary input text."""
     lines = []
@@ -310,7 +344,9 @@ def build_hour_digest(ordered):
         ups = [_flatten(t, DIGEST_PROMPT_TRUNC) for _, t in s["prompts"][:MAX_PROMPTS_PER_SESSION]]
         if ups:
             lines.append("  user input: " + " / ".join(ups))
-        ats = [_flatten(t, ASSISTANT_TRUNC) for _, t in s["assistant_texts"][:MAX_ASSISTANT_SNIPPETS]]
+        ats = [_flatten(t, ASSISTANT_TRUNC)
+               for _, t in select_assistant_snippets(
+                   s["assistant_texts"], MAX_ASSISTANT_SNIPPETS, ASSISTANT_TAIL_KEEP)]
         if ats:
             lines.append("  assistant response gist: " + " / ".join(ats))
         lines.append("")
