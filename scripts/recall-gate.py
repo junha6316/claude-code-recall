@@ -12,10 +12,26 @@ import sys
 import os
 import re
 import json
+import shutil
 import subprocess
 
 HOME = os.path.expanduser("~")
 RECALL = os.path.join(HOME, ".claude", "skills", "recall", "recall.py")
+
+# Fast model for keyword extraction (claude -p, single turn).
+LLM_MODEL = "claude-haiku-4-5-20251001"
+LLM_SYSTEM_PROMPT = (
+    "You are a search-keyword extractor for a past-work recall system. "
+    "Given the user's message, output ONLY comma-separated search terms on a "
+    "single line - no sentences, no preamble, no tool calls. Prioritize ticket "
+    "IDs (e.g. BE-1052), file paths, error messages, and proper nouns. Exclude "
+    "URL parts (https, domain names like yplabs/atlassian), generic verbs, and "
+    "pronouns. Also IGNORE meta-instructions about which tool or skill to use "
+    "for searching (e.g. 'recall 스킬에서', 'using recall', 'search for') - "
+    "extract only terms describing the actual past work or subject being "
+    "recalled. Keep each term in the SAME language as it appears in the message "
+    "- do NOT translate Korean terms into English. Output 3-6 terms."
+)
 
 # Recall-question triggers (per the CLAUDE.md recall rule).
 # Compiled case-insensitively, so the English patterns below match regardless
@@ -108,6 +124,69 @@ def extract_keywords(prompt):
     return out[:4]
 
 
+def _claude_bin():
+    return shutil.which("claude") or next(
+        (p for p in [os.path.join(HOME, ".local", "bin", "claude")]
+         if os.path.exists(p)),
+        None,
+    )
+
+
+def extract_keywords_llm(prompt):
+    """Extract search terms via claude -p (Haiku, single turn). Returns None on
+    failure -> caller falls back to the regex extractor.
+
+    - --tools '' : block the agent tool loop (single turn).
+    - --setting-sources '' : don't load hooks = recursion guard.
+    - --system-prompt : replace the 'You are Claude Code' framing with the
+      extractor role.
+    """
+    claude = _claude_bin()
+    if not claude:
+        return None
+    try:
+        r = subprocess.run(
+            [claude, "-p",
+             "--model", LLM_MODEL,
+             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+             "--setting-sources", "",
+             "--tools", "",
+             "--system-prompt", LLM_SYSTEM_PROMPT,
+             "--output-format", "json",
+             prompt],
+            capture_output=True, text=True, timeout=15,
+            env={**os.environ, "CLAUDE_RECALL_GATE": "1"},
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        data = json.loads(r.stdout)
+        if data.get("is_error"):
+            return None
+        text = (data.get("result") or "").strip()
+        line = next((ln for ln in text.splitlines() if ln.strip()), "")
+        out, seen = [], set()
+        for part in line.split(","):
+            t = part.strip().strip("`'\"[]")
+            # Sentences/cruft (long tokens or multi-word) => treat as failed
+            # extraction and drop them.
+            if not t or len(t) > 40 or len(t.split()) > 4:
+                continue
+            if len(t) >= 2 and t.lower() not in seen:
+                seen.add(t.lower())
+                out.append(t)
+        return out[:6] or None
+    except Exception:
+        return None
+
+
+def get_keywords(prompt):
+    """Return (keywords, method). LLM first, regex fallback on failure."""
+    kws = extract_keywords_llm(prompt)
+    if kws:
+        return kws, "model"
+    return extract_keywords(prompt), "regex fallback"
+
+
 def run(payload):
     """Return the JSON string to inject when a recall trigger matches, else None."""
     prompt = payload.get("prompt") or payload.get("user_prompt") or ""
@@ -115,7 +194,7 @@ def run(payload):
         return None
     if prompt.lstrip().startswith(SYSTEM_WRAPPER_PREFIXES):
         return None  # harness-injected content, not a user question
-    kws = extract_keywords(prompt)
+    kws, method = get_keywords(prompt)
     if not kws:
         return None
     try:
@@ -131,10 +210,10 @@ def run(payload):
         "[recall enforcement hook] This prompt was detected as a recall question "
         "about past work. Per the CLAUDE.md recall rule, do not rely on memory or "
         "guessing; answer using the auto-run recall result below as your primary "
-        "source. Auto-extracted keywords: [%s]. If the keywords missed the mark or "
-        "the result is sparse, re-run the recall skill yourself with more precise "
-        "keywords before answering.\n\n--- recall result ---\n%s"
-    ) % (", ".join(kws), recall_out or "(no result)")
+        "source. Auto-extracted keywords (%s): [%s]. If the keywords missed the "
+        "mark or the result is sparse, re-run the recall skill yourself with more "
+        "precise keywords before answering.\n\n--- recall result ---\n%s"
+    ) % (method, ", ".join(kws), recall_out or "(no result)")
 
     return json.dumps({
         "hookSpecificOutput": {
@@ -145,6 +224,11 @@ def run(payload):
 
 
 def main():
+    # Recursion guard: if the hook's own `claude -p` re-triggers this hook,
+    # pass through immediately. (--setting-sources '' also blocks it; this is a
+    # second safety net.)
+    if os.environ.get("CLAUDE_RECALL_GATE"):
+        return
     # fail-open: swallow any exception and pass through silently. Even if recall
     # injection fails, the prompt/session is never blocked (output nothing = no
     # injection).
