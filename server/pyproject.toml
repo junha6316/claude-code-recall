@@ -2,9 +2,14 @@
 name = "recall-pipeline"
 version = "0.1.0"
 description = "Server-side port of the claude-code-recall work-timeline pipeline (Anthropic API backend)"
-requires-python = ">=3.9"
+# 3.10+: FastMCP introspects tool signatures at runtime, and app.py uses
+# PEP 604 unions (str | None) that 3.9's get_type_hints can't evaluate.
+requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.40",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "mcp>=1.10",
 ]
 
 [build-system]
@@ -12,4 +17,4 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["recall_pipeline"]
+packages = ["recall_pipeline", "recall_server"]

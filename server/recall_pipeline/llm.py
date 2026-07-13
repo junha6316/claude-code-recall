@@ -13,9 +13,20 @@ import anthropic
 
 _client = None
 
+# Optional pre-call hook — the server's build worker installs a per-tenant
+# budget check here (raises LLMError when the daily cap is hit, which stops
+# the cursor exactly like any other LLM failure and resumes next run/day).
+# Phase 1 runs builds one-at-a-time, so a module-level hook is sufficient.
+before_call = None
+
 
 class LLMError(RuntimeError):
     pass
+
+
+class BudgetExceeded(LLMError):
+    """Raised by a before_call budget hook — inherits LLMError so every
+    pipeline stage treats it as a retryable stop, not a crash."""
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -29,6 +40,8 @@ def complete(prompt: str, *, model: str, timeout: float = 180.0,
              max_tokens: int = 8192) -> str:
     """Single prompt → text completion. Raises LLMError on API failure or
     empty output (empty means the window would silently lose its summary)."""
+    if before_call is not None:
+        before_call()
     try:
         response = _get_client().with_options(timeout=timeout).messages.create(
             model=model,
