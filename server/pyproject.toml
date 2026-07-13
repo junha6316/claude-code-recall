@@ -1,0 +1,15 @@
+[project]
+name = "recall-pipeline"
+version = "0.1.0"
+description = "Server-side port of the claude-code-recall work-timeline pipeline (Anthropic API backend)"
+requires-python = ">=3.9"
+dependencies = [
+    "anthropic>=0.40",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["recall_pipeline"]
