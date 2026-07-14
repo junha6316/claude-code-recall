@@ -15,6 +15,18 @@ import { Container, getContainer } from "@cloudflare/containers";
 export class RecallContainer extends Container {
   defaultPort = 8300;
   sleepAfter = "15m";   // > build debounce, so a build isn't cut mid-flight
+
+  // Worker secrets (wrangler secret put ...) forwarded into the container.
+  // RECALL_SEED_TENANT rides along because the container's tenants.db is
+  // rebuilt on every cold start (see recall_server/app.py seed bridge).
+  envVars = {
+    RECALL_R2_BUCKET: this.env.RECALL_R2_BUCKET,
+    RECALL_R2_ENDPOINT: this.env.RECALL_R2_ENDPOINT,
+    RECALL_R2_ACCESS_KEY: this.env.RECALL_R2_ACCESS_KEY,
+    RECALL_R2_SECRET_KEY: this.env.RECALL_R2_SECRET_KEY,
+    ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
+    RECALL_SEED_TENANT: this.env.RECALL_SEED_TENANT,
+  };
 }
 
 async function tenantKey(request) {

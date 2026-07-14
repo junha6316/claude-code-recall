@@ -85,13 +85,21 @@ class TenantStore:
             model: str | None = None, backfill_floor: str | None = None) -> str:
         """Create tenant + one token. Returns the plaintext token (shown once)."""
         token = "rcl_" + secrets.token_hex(24)
+        self.add_with_token(tenant_id, token, tz=tz, lang=lang,
+                            model=model, backfill_floor=backfill_floor)
+        return token
+
+    def add_with_token(self, tenant_id: str, token: str, tz: str = "UTC",
+                       lang: str = "English", model: str | None = None,
+                       backfill_floor: str | None = None):
+        """Create tenant with a caller-supplied token (env-seeded deploys,
+        where the DB is rebuilt on every cold start)."""
         with self._conn() as c:
             c.execute("INSERT INTO tenants (tenant_id, tz, lang, model, backfill_floor) "
                       "VALUES (?, ?, ?, ?, ?)",
                       (tenant_id, tz, lang, model, backfill_floor))
             c.execute("INSERT INTO tokens (token_hash, tenant_id) VALUES (?, ?)",
                       (_hash(token), tenant_id))
-        return token
 
     def mark_deleted(self, tenant_id: str):
         """Soft-delete the account and revoke its tokens (data wipe is the

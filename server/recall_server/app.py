@@ -34,6 +34,19 @@ store = TenantStore(os.environ.get("RECALL_TENANTS_DB")
                     or os.path.join(cfg.data_root, "tenants.db"))
 store.import_json(cfg.tenants_file)
 
+# Personal-deploy bridge for ephemeral disks (Cloudflare Containers): the DB
+# is rebuilt empty on every cold start, so seed one tenant from env. Format:
+#   RECALL_SEED_TENANT="tenant_id:tz:lang:token"
+# Multi-tenant production replaces this with a D1 lookup — do not grow it.
+_seed = os.environ.get("RECALL_SEED_TENANT")
+if _seed:
+    _tid, _tz, _lang, _token = _seed.split(":", 3)
+    if store.resolve(_token, cfg.data_root) is None:
+        try:
+            store.add_with_token(_tid, _token, tz=_tz, lang=_lang)
+        except Exception as e:   # already exists with another token, etc.
+            print("[seed] skipped: %s" % e)
+
 # R2 persistence (None in local mode — everything below degrades to Phase 1).
 _r2cfg = R2Config.from_env()
 r2 = R2Sync(_r2cfg) if _r2cfg else None
