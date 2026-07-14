@@ -25,6 +25,9 @@ export class RecallContainer extends Container {
     RECALL_R2_ACCESS_KEY: this.env.RECALL_R2_ACCESS_KEY,
     RECALL_R2_SECRET_KEY: this.env.RECALL_R2_SECRET_KEY,
     ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
+    // Optional: point the SDK at a proxy (tunnel-Meridian mode) instead of
+    // api.anthropic.com — subscription LLM without an API key.
+    ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
     RECALL_SEED_TENANT: this.env.RECALL_SEED_TENANT,
   };
 }
