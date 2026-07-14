@@ -21,7 +21,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import build, search, storage
+from . import build, search, storage, ui
 from .config import ServerConfig, Tenant
 from .r2 import R2Config, R2Sync
 from .tenants import TenantStore
@@ -241,5 +241,7 @@ def status(tenant: Tenant = Depends(get_tenant)):
         "last_build": scheduler.last_status.get(tenant.tenant_id),
     }
 
+
+app.include_router(ui.make_router(get_tenant))
 
 app.mount("/mcp", mcp_asgi)

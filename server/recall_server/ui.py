@@ -1,0 +1,359 @@
+# -*- coding: utf-8 -*-
+"""Read-only web UI over the built recall data (timeline + threads + search).
+
+GET /ui serves a single self-contained page (no auth — it holds no data);
+the page calls the /v1/ui/* JSON endpoints below with the tenant's bearer
+token, which the browser keeps in localStorage. Same auth dependency as the
+rest of the API.
+"""
+from __future__ import annotations
+
+import os
+import re
+import glob
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
+
+from . import search
+from .config import Tenant
+
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")   # also blocks path tricks
+
+
+def make_router(get_tenant) -> APIRouter:
+    """get_tenant is injected by app.py to avoid a circular import."""
+    router = APIRouter()
+
+    @router.get("/ui", response_class=HTMLResponse)
+    def ui_page():
+        return PAGE
+
+    @router.get("/v1/ui/timeline")
+    def timeline_dates(tenant: Tenant = Depends(get_tenant)):
+        dates = []
+        for p in glob.glob(os.path.join(tenant.ctx.output_dir, "*.md")):
+            d = os.path.splitext(os.path.basename(p))[0]
+            if DATE_RE.match(d):
+                dates.append(d)
+        return {"dates": sorted(dates, reverse=True)}
+
+    @router.get("/v1/ui/timeline/{date}")
+    def timeline_day(date: str, tenant: Tenant = Depends(get_tenant)):
+        if not DATE_RE.match(date):
+            raise HTTPException(status_code=400, detail="bad date")
+        try:
+            with open(os.path.join(tenant.ctx.output_dir, date + ".md"),
+                      "r", encoding="utf-8") as f:
+                return {"date": date, "content": f.read()}
+        except OSError:
+            raise HTTPException(status_code=404, detail="no timeline for that date")
+
+    @router.get("/v1/ui/threads")
+    def threads_list(tenant: Tenant = Depends(get_tenant)):
+        registry = search.load_registry(tenant.ctx)
+        out = []
+        for slug, e in registry.items():
+            if not isinstance(e, dict) or e.get("alias_of"):
+                continue
+            out.append({
+                "slug": slug,
+                "name": e.get("name") or slug,
+                "first_active": e.get("first_active") or "",
+                "last_active": e.get("last_active") or "",
+                "count": e.get("count") or 0,
+                "has_state": bool(e.get("current_state")),
+            })
+        registered = set(registry.keys())
+        for path in glob.glob(os.path.join(tenant.ctx.threads_dir, "*.md")):
+            slug = os.path.splitext(os.path.basename(path))[0]
+            if slug in registered:
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except OSError:
+                continue
+            dates = search.THREAD_DATE_RE.findall(content)
+            out.append({"slug": slug, "name": search.h1_of(content) or slug,
+                        "first_active": dates[0] if dates else "",
+                        "last_active": dates[-1] if dates else "",
+                        "count": None, "has_state": False})
+        out.sort(key=lambda t: (t["last_active"], t["first_active"]), reverse=True)
+        return {"threads": out}
+
+    @router.get("/v1/ui/threads/{slug}")
+    def thread_detail(slug: str, tenant: Tenant = Depends(get_tenant)):
+        if not SLUG_RE.match(slug):
+            raise HTTPException(status_code=400, detail="bad slug")
+        registry = search.load_registry(tenant.ctx)
+        canonical = search.resolve_canonical(slug, registry)
+        e = registry.get(canonical, {})
+        content = ""
+        try:
+            with open(os.path.join(tenant.ctx.threads_dir, canonical + ".md"),
+                      "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            if not e:
+                raise HTTPException(status_code=404, detail="no such thread")
+        return {"slug": canonical,
+                "name": e.get("name") or search.h1_of(content) or canonical,
+                "current_state": e.get("current_state") or "",
+                "content": content}
+
+    @router.get("/v1/ui/search")
+    def ui_search(q: str, limit: int = 15, tenant: Tenant = Depends(get_tenant)):
+        terms = search.terms_of(q)
+        if not terms:
+            return {"terms": [], "threads": [], "timeline": []}
+        return {"terms": terms,
+                "threads": search.search_threads(tenant.ctx, terms, limit),
+                "timeline": search.search_timeline(tenant.ctx, terms, limit)}
+
+    return router
+
+
+PAGE = """<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>recall</title>
+<style>
+:root{
+  --bg:#ffffff; --fg:#1a1a1a; --muted:#6b7280; --line:#e5e7eb;
+  --side:#f9fafb; --accent:#2563eb; --accent-bg:#eff6ff;
+  --code-bg:#f3f4f6; --state-bg:#fefce8; --state-line:#fde68a;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#111418; --fg:#e5e7eb; --muted:#9ca3af; --line:#2a2f37;
+    --side:#161a20; --accent:#60a5fa; --accent-bg:#1e2a3f;
+    --code-bg:#1f242c; --state-bg:#2a2612; --state-line:#4d431e;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+     background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:16px;padding:10px 16px;
+       border-bottom:1px solid var(--line);flex:none}
+header h1{font-size:15px;margin:0}
+header .tabs{display:flex;gap:4px}
+header .tabs button{border:none;background:none;color:var(--muted);padding:6px 10px;
+       border-radius:6px;cursor:pointer;font-size:13px}
+header .tabs button.on{background:var(--accent-bg);color:var(--accent);font-weight:600}
+header .sp{flex:1}
+header .token{font-size:12px;color:var(--muted);background:none;
+       border:1px solid var(--line);border-radius:6px;padding:4px 8px;cursor:pointer}
+main{flex:1;display:flex;min-height:0}
+#side{width:300px;flex:none;overflow-y:auto;border-right:1px solid var(--line);
+      background:var(--side);padding:8px}
+#side .item{display:block;width:100%;text-align:left;border:none;background:none;
+      color:var(--fg);padding:7px 10px;border-radius:6px;cursor:pointer;font-size:13px}
+#side .item:hover{background:var(--accent-bg)}
+#side .item.on{background:var(--accent-bg);color:var(--accent);font-weight:600}
+#side .item .meta{display:block;color:var(--muted);font-size:11px;font-weight:400}
+#content{flex:1;overflow-y:auto;padding:20px 28px;min-width:0}
+#content h1{font-size:19px;margin:0 0 12px;border-bottom:1px solid var(--line);padding-bottom:8px}
+#content h2{font-size:14px;margin:20px 0 6px;color:var(--accent)}
+#content ul{margin:4px 0;padding-left:20px}
+#content li{margin:2px 0}
+#content code{background:var(--code-bg);border-radius:4px;padding:1px 5px;font-size:12px}
+#content p{margin:6px 0}
+.state{background:var(--state-bg);border:1px solid var(--state-line);border-radius:8px;
+       padding:10px 14px;margin:0 0 16px;white-space:pre-wrap;font-size:13px}
+.state .cap{font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.05em;
+       display:block;margin-bottom:4px}
+.hit{border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:10px 0;cursor:pointer}
+.hit:hover{border-color:var(--accent)}
+.hit .h{font-weight:600}
+.hit .m{color:var(--muted);font-size:12px}
+.hit .l{font-size:12px;color:var(--muted);margin-top:4px;white-space:pre-wrap}
+#searchbar{display:none;padding:12px 28px 0}
+#searchbar input{width:100%;max-width:640px;padding:9px 12px;font-size:14px;
+       border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
+.empty{color:var(--muted);padding:30px 0;text-align:center}
+#gate{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;
+      justify-content:center;flex-direction:column;gap:12px;z-index:10}
+#gate input{width:340px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;
+      background:var(--side);color:var(--fg);font-size:13px}
+#gate button{padding:9px 18px;border:none;border-radius:8px;background:var(--accent);
+      color:#fff;cursor:pointer}
+</style>
+</head>
+<body>
+<header>
+  <h1>recall</h1>
+  <div class="tabs">
+    <button id="tab-timeline" onclick="show('timeline')">타임라인</button>
+    <button id="tab-threads" onclick="show('threads')">스레드</button>
+    <button id="tab-search" onclick="show('search')">검색</button>
+  </div>
+  <div class="sp"></div>
+  <button class="token" onclick="gate()">토큰 변경</button>
+</header>
+<div id="searchbar"><input id="q" placeholder="과거 작업 검색… (Enter)" onkeydown="if(event.key==='Enter')runSearch()"></div>
+<main>
+  <div id="side"></div>
+  <div id="content"><div class="empty">불러오는 중…</div></div>
+</main>
+<div id="gate">
+  <div>recall 접근 토큰을 입력하세요</div>
+  <input id="tok" type="password" placeholder="rcl_…">
+  <button onclick="saveTok()">저장</button>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let view='timeline';
+
+function gate(){ $('gate').style.display='flex'; $('tok').focus(); }
+function saveTok(){ localStorage.setItem('recall_token',$('tok').value.trim());
+  $('gate').style.display='none'; boot(); }
+
+async function api(path){
+  const r=await fetch(path,{headers:{'Authorization':'Bearer '+(localStorage.getItem('recall_token')||'')}});
+  if(r.status===401){ gate(); throw new Error('unauthorized'); }
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  return r.json();
+}
+
+function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function inline(s){return esc(s)
+  .replace(/`([^`]+)`/g,'<code>$1</code>')
+  .replace(/\\*\\*([^*]+)\\*\\*/g,'<strong>$1</strong>');}
+
+function renderMd(md){
+  const out=[]; let depth=0, para=[];
+  const flushP=()=>{ if(para.length){out.push('<p>'+inline(para.join(' '))+'</p>'); para=[];} };
+  const close=d=>{ while(depth>d){out.push('</ul>'); depth--;} };
+  for(const raw of md.split('\\n')){
+    const li=raw.match(/^(\\s*)- (.*)$/);
+    if(raw.startsWith('# ')){ flushP(); close(0); out.push('<h1>'+inline(raw.slice(2))+'</h1>'); }
+    else if(raw.startsWith('## ')){ flushP(); close(0); out.push('<h2>'+inline(raw.slice(3))+'</h2>'); }
+    else if(li){ flushP();
+      const d=Math.floor(li[1].replace(/\\t/g,'    ').length/4)+1;
+      while(depth<d){out.push('<ul>'); depth++;}
+      close(d);
+      out.push('<li>'+inline(li[2])+'</li>'); }
+    else if(!raw.trim()){ flushP(); close(0); }
+    else { close(0); para.push(raw.trim()); }
+  }
+  flushP(); close(0);
+  return out.join('\\n');
+}
+
+function show(v){
+  view=v;
+  for(const t of ['timeline','threads','search'])
+    $('tab-'+t).classList.toggle('on',t===v);
+  $('searchbar').style.display = v==='search' ? 'block':'none';
+  $('side').style.display = v==='search' ? 'none':'block';
+  if(v==='timeline') loadDates();
+  else if(v==='threads') loadThreads();
+  else { $('content').innerHTML='<div class="empty">검색어를 입력하세요</div>'; $('q').focus(); }
+}
+
+let pending=null;   // {type:'day'|'thread', id} — set by search-hit jumps
+
+function sideList(items, selectedKey){
+  $('side').innerHTML='';
+  for(const it of items){
+    const b=document.createElement('button');
+    b.className='item'; b.innerHTML=it.html;
+    if(it.key===selectedKey) b.classList.add('on');
+    b.onclick=()=>{ for(const x of $('side').children) x.classList.remove('on');
+      b.classList.add('on'); it.open(); };
+    $('side').appendChild(b);
+  }
+}
+
+async function loadDates(){
+  try{
+    const {dates}=await api('/v1/ui/timeline');
+    if(!dates.length){ $('side').innerHTML=''; $('content').innerHTML=
+      '<div class="empty">아직 빌드된 타임라인이 없습니다</div>'; return; }
+    const target = (pending&&pending.type==='day'&&dates.includes(pending.id))
+      ? pending.id : dates[0];
+    pending=null;
+    sideList(dates.map(d=>({key:d, html:esc(d), open:()=>openDay(d)})), target);
+    openDay(target);
+  }catch(e){ if(e.message!=='unauthorized') $('content').innerHTML=
+      '<div class="empty">'+esc(e.message)+'</div>'; }
+}
+
+async function openDay(d){
+  const {content}=await api('/v1/ui/timeline/'+d);
+  $('content').innerHTML=renderMd(content);
+  $('content').scrollTop=0;
+}
+
+async function loadThreads(){
+  try{
+    const {threads}=await api('/v1/ui/threads');
+    if(!threads.length){ $('side').innerHTML=''; $('content').innerHTML=
+      '<div class="empty">아직 스레드가 없습니다</div>'; return; }
+    const target = (pending&&pending.type==='thread') ? pending.id : null;
+    pending=null;
+    sideList(threads.map(t=>({
+      key:t.slug,
+      html:esc(t.name)+'<span class="meta">'+esc(t.last_active||'')
+           +(t.count?' · 세션 '+t.count:'')+(t.has_state?' · 상태요약':'')+'</span>',
+      open:()=>openThread(t.slug)})), target);
+    if(target) openThread(target);
+    else $('content').innerHTML='<div class="empty">스레드를 선택하세요</div>';
+  }catch(e){ if(e.message!=='unauthorized') $('content').innerHTML=
+      '<div class="empty">'+esc(e.message)+'</div>'; }
+}
+
+async function openThread(slug){
+  const t=await api('/v1/ui/threads/'+slug);
+  let html='';
+  if(t.current_state)
+    html+='<div class="state"><span class="cap">현재 상태</span>'+esc(t.current_state)+'</div>';
+  html+=renderMd(t.content||'');
+  if(!t.content && !t.current_state) html='<div class="empty">내용이 없습니다</div>';
+  $('content').innerHTML=html;
+  $('content').scrollTop=0;
+}
+
+async function runSearch(){
+  const q=$('q').value.trim();
+  if(!q) return;
+  $('content').innerHTML='<div class="empty">검색 중…</div>';
+  try{
+    const r=await api('/v1/ui/search?q='+encodeURIComponent(q));
+    let html='';
+    if(r.threads.length){
+      html+='<h1>작업 스레드 ('+r.threads.length+')</h1>';
+      for(const h of r.threads)
+        html+='<div class="hit" data-slug="'+esc(h.slug)+'" onclick="jumpThread(this.dataset.slug)">'
+          +'<div class="h">'+esc(h.name)+'</div>'
+          +'<div class="m">'+h.distinct+'/'+r.terms.length+' terms · '+h.total+'회 · '
+          +esc(h.last_date||'-')+'</div>'
+          +(h.current_state?'<div class="l">'+esc(h.current_state.slice(0,300))+'</div>':'')
+          +'<div class="l">'+h.lines.map(esc).join('\\n')+'</div></div>';
+    }
+    if(r.timeline.length){
+      html+='<h1>타임라인 ('+r.timeline.length+')</h1>';
+      for(const h of r.timeline)
+        html+='<div class="hit" data-date="'+esc(h.date)+'" onclick="jumpDay(this.dataset.date)">'
+          +'<div class="h">['+esc(h.date)+'] '+esc(h.heading)+'</div>'
+          +'<div class="m">'+h.distinct+'/'+r.terms.length+' terms · '+h.total+'회</div>'
+          +'<div class="l">'+h.lines.map(esc).join('\\n')+'</div></div>';
+    }
+    $('content').innerHTML = html || '<div class="empty">검색 결과가 없습니다</div>';
+  }catch(e){ if(e.message!=='unauthorized') $('content').innerHTML=
+      '<div class="empty">'+esc(e.message)+'</div>'; }
+}
+
+function jumpThread(slug){ pending={type:'thread',id:slug}; show('threads'); }
+function jumpDay(d){ pending={type:'day',id:d}; show('timeline'); }
+
+function boot(){ show(view); }
+if(!localStorage.getItem('recall_token')) gate(); else boot();
+</script>
+</body>
+</html>
+"""
