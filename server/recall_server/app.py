@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from . import build, search, storage
 from .config import ServerConfig, Tenant
@@ -99,6 +100,11 @@ mcp = FastMCP(
     ),
     stateless_http=True,
     streamable_http_path="/",   # mounted at /mcp below → endpoint is <url>/mcp
+    # The SDK's DNS-rebinding Host check defaults to localhost-only, which
+    # 421s every request behind the workers.dev proxy. Rebinding is already
+    # blocked here: our middleware rejects any request without a bearer token,
+    # and a rebound browser origin cannot attach that header.
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 
 
