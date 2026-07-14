@@ -91,6 +91,10 @@ class BuildScheduler:
         self._timers: dict[str, asyncio.Task] = {}
         self._build_lock = asyncio.Lock()
         self.last_status: dict[str, dict] = {}
+        # Optional async hook run after each build, inside the build lock —
+        # the app installs the R2 output push here so persisted state is
+        # consistent with what the build just wrote.
+        self.after_build = None
 
     def schedule(self, tenant_id: str, ctx: TenantContext):
         prev = self._timers.get(tenant_id)
@@ -118,6 +122,8 @@ class BuildScheduler:
     async def build_now(self, tenant_id: str, ctx: TenantContext) -> dict:
         async with self._build_lock:
             status = await asyncio.to_thread(run_build, ctx, self.cfg.llm_daily_call_cap)
+            if self.after_build is not None:
+                await self.after_build(tenant_id, ctx)
         status["at"] = datetime.now(ctx.tz).isoformat(timespec="seconds")
         self.last_status[tenant_id] = status
         print("[build] %s: %s" % (tenant_id, status))

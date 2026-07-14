@@ -1,0 +1,34 @@
+// Cloudflare deployment: Worker (router) + Container (recall server).
+// UNTESTED SCAFFOLD — requires a Cloudflare account with Workers Paid;
+// verify bindings against `wrangler deploy` before first use.
+//
+// TODO before first deploy (account-specific, intentionally not filled in):
+//  1. Container env: RECALL_R2_BUCKET/ENDPOINT/ACCESS_KEY/SECRET_KEY and
+//     ANTHROPIC_API_KEY must reach the container (envVars/secrets on the
+//     container config, or the Container class's envVars in index.js).
+//     Without them the app boots in Phase-1 local mode → no persistence.
+//  2. tenants.db is on the ephemeral disk — production needs the D1 hookup
+//     (Worker-side token lookup) before multi-instance/public use.
+//  3. Check `image` build context: server/Dockerfile COPYs relative to
+//     server/, so the build context must be ../server.
+{
+  "name": "recall-server",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-01",
+  "containers": [
+    {
+      "class_name": "RecallContainer",
+      "image": "../server/Dockerfile",
+      "instance_type": "standard-2",   // 1 vCPU / 6 GiB / 12 GB disk
+      "max_instances": 5
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "RECALL_CONTAINER", "class_name": "RecallContainer" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RecallContainer"] }
+  ]
+}

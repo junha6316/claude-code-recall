@@ -12,6 +12,8 @@ Run:
 """
 from __future__ import annotations
 
+import os
+import asyncio
 import contextvars
 from contextlib import asynccontextmanager
 
@@ -19,10 +21,23 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from mcp.server.fastmcp import FastMCP
 
 from . import build, search, storage
-from .config import ServerConfig, Tenant, load_tenants
+from .config import ServerConfig, Tenant
+from .r2 import R2Config, R2Sync
+from .tenants import TenantStore
 
 cfg = ServerConfig.from_env()
 scheduler = build.BuildScheduler(cfg)
+
+# Tenant store: SQLite locally, D1-compatible schema in production. On first
+# boot, silently import a Phase 1 tenants.json if one sits at the legacy path.
+store = TenantStore(os.environ.get("RECALL_TENANTS_DB")
+                    or os.path.join(cfg.data_root, "tenants.db"))
+store.import_json(cfg.tenants_file)
+
+# R2 persistence (None in local mode — everything below degrades to Phase 1).
+_r2cfg = R2Config.from_env()
+r2 = R2Sync(_r2cfg) if _r2cfg else None
+_pull_locks: dict[str, asyncio.Lock] = {}   # tenant_id -> cold-pull guard
 
 # Tenant for the in-flight MCP request (set by the auth middleware; contextvars
 # propagate through the ASGI call into the tool handlers).
@@ -33,13 +48,30 @@ _mcp_tenant: contextvars.ContextVar[Tenant | None] = contextvars.ContextVar(
 def _resolve_token(authorization: str | None) -> Tenant | None:
     if not authorization or not authorization.startswith("Bearer "):
         return None
-    return load_tenants(cfg).get(authorization[len("Bearer "):].strip())
+    resolved = store.resolve(authorization[len("Bearer "):].strip(), cfg.data_root)
+    if resolved is None:
+        return None
+    tenant_id, ctx = resolved
+    return Tenant(tenant_id=tenant_id, ctx=ctx)
 
 
-def get_tenant(authorization: str | None = Header(default=None)) -> Tenant:
+async def _ensure_warm(tenant: Tenant):
+    """Cold container disk (fresh instance after scale-to-zero) → restore the
+    tenant's data from R2 before serving. One pull per tenant at a time."""
+    if r2 is None or not r2.is_cold(tenant.ctx):
+        return
+    lock = _pull_locks.setdefault(tenant.tenant_id, asyncio.Lock())
+    async with lock:
+        if r2.is_cold(tenant.ctx):   # re-check after waiting on the lock
+            n = await asyncio.to_thread(r2.pull_tenant, tenant.tenant_id, tenant.ctx)
+            print("[r2] cold start: restored %d object(s) for %s" % (n, tenant.tenant_id))
+
+
+async def get_tenant(authorization: str | None = Header(default=None)) -> Tenant:
     tenant = _resolve_token(authorization)
     if tenant is None:
         raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+    await _ensure_warm(tenant)
     return tenant
 
 
@@ -106,6 +138,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="recall server", lifespan=lifespan)
 
+if r2 is not None:
+    async def _push_after_build(tenant_id, ctx):
+        n = await asyncio.to_thread(r2.push_outputs, tenant_id, ctx)
+        print("[r2] pushed %d output object(s) for %s" % (n, tenant_id))
+    scheduler.after_build = _push_after_build
+
 
 @app.middleware("http")
 async def mcp_auth(request: Request, call_next):
@@ -114,6 +152,7 @@ async def mcp_auth(request: Request, call_next):
         tenant = _resolve_token(request.headers.get("authorization"))
         if tenant is None:
             return Response(status_code=401, content="invalid or missing bearer token")
+        await _ensure_warm(tenant)   # recall must see R2-restored data post-sleep
         _mcp_tenant.set(tenant)
     return await call_next(request)
 
@@ -142,6 +181,10 @@ async def ingest(project: str, session_file: str, request: Request,
     except storage.OffsetMismatch as e:
         # Client resyncs from this size (append-only ⇒ same prefix content).
         raise HTTPException(status_code=409, detail={"current_size": e.current_size})
+    if r2 is not None:
+        # Durable before ack — a post-ack sleep must not lose the delta.
+        relpath = "projects/%s/%s" % (project, session_file)
+        await asyncio.to_thread(r2.push_file, tenant.tenant_id, tenant.ctx, relpath)
     scheduler.schedule(tenant.tenant_id, tenant.ctx)
     return {"size": new_size}
 
@@ -150,6 +193,25 @@ async def ingest(project: str, session_file: str, request: Request,
 async def build_now(tenant: Tenant = Depends(get_tenant)):
     """Manual build trigger (verification/ops; ingest normally debounces this)."""
     return await scheduler.build_now(tenant.tenant_id, tenant.ctx)
+
+
+@app.delete("/v1/tenant")
+async def delete_tenant(tenant: Tenant = Depends(get_tenant)):
+    """Self-serve deletion: wipe the R2 prefix and local data, then revoke.
+
+    Wipe-before-revoke keeps the operation retryable: if the R2 delete fails
+    partway, the token stays valid so the client can call DELETE again and
+    finish the wipe. Revoking first would 401 that retry and strand the
+    half-deleted data. (The local rmtree ignores errors — local is just the
+    ephemeral cache of the already-wiped R2 state.) mark_deleted runs last
+    and is idempotent."""
+    import shutil
+    removed_r2 = 0
+    if r2 is not None:
+        removed_r2 = await asyncio.to_thread(r2.delete_tenant, tenant.tenant_id)
+    await asyncio.to_thread(shutil.rmtree, tenant.ctx.data_root, True)
+    store.mark_deleted(tenant.tenant_id)
+    return {"deleted": tenant.tenant_id, "r2_objects_removed": removed_r2}
 
 
 @app.get("/v1/status")
