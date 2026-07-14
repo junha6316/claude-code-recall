@@ -26,8 +26,10 @@ import json
 import glob
 import hashlib
 import argparse
+import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
@@ -38,6 +40,7 @@ SERVER_URL = os.environ.get("RECALL_SERVER_URL", "").rstrip("/")
 TOKEN = os.environ.get("RECALL_TOKEN", "")
 ANCHOR_BYTES = 256
 MAX_DELTA = 4 * 1024 * 1024   # upload in chunks the server accepts comfortably
+WORKERS = int(os.environ.get("RECALL_UPLOAD_WORKERS", "8"))
 
 
 def load_state():
@@ -66,6 +69,8 @@ def anchor_of(f, offset):
 def http(method, path, data=None, headers=None):
     req = urllib.request.Request(SERVER_URL + path, data=data, method=method)
     req.add_header("Authorization", "Bearer %s" % TOKEN)
+    # Cloudflare bot protection 403s the default Python-urllib/3.x UA
+    req.add_header("User-Agent", "recall-upload/1.0")
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     return urllib.request.urlopen(req, timeout=60)
@@ -157,6 +162,7 @@ def main():
     uploaded = skipped = 0
     total_bytes = 0
 
+    todo = []
     for path in sorted(glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl"))):
         relpath = "%s/%s" % (os.path.basename(os.path.dirname(path)), os.path.basename(path))
         if args.project and args.project not in relpath:
@@ -172,22 +178,44 @@ def main():
                 and entry.get("mtime") == st.st_mtime):
             skipped += 1
             continue
+        todo.append((path, relpath, dict(entry)))   # copy: workers never touch `files`
+
+    cap_hit = threading.Event()   # daily byte cap → every later POST 429s; stop early
+
+    def work(item):
+        path, relpath, entry = item
+        if cap_hit.is_set():
+            return ("cap", relpath, None, 0)
         try:
-            files[relpath], delta = upload_file(path, relpath, entry, full=args.full)
+            entry, delta = upload_file(path, relpath, entry, full=args.full)
+            return ("ok", relpath, entry, delta)
         except urllib.error.HTTPError as e:
-            print("  ! %s: HTTP %d %s" % (relpath, e.code, e.reason), file=sys.stderr)
-            continue
+            if e.code == 429:
+                cap_hit.set()
+                return ("cap", relpath, None, 0)
+            return ("err", relpath, "HTTP %d %s" % (e.code, e.reason), 0)
         except OSError as e:
-            print("  ! %s: %s" % (relpath, e), file=sys.stderr)
-            continue
-        save_state(state)   # per-file commit — a crash resumes cleanly
-        if delta:
-            uploaded += 1
-            total_bytes += delta
-            print("  ↑ %s (+%d bytes)" % (relpath, delta))
+            return ("err", relpath, str(e), 0)
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        for fut in as_completed([pool.submit(work, item) for item in todo]):
+            status, relpath, payload, delta = fut.result()
+            if status == "err":
+                print("  ! %s: %s" % (relpath, payload), file=sys.stderr)
+                continue
+            if status == "cap":
+                continue
+            files[relpath] = payload
+            save_state(state)   # per-file commit (main thread only) — a crash resumes cleanly
+            if delta:
+                uploaded += 1
+                total_bytes += delta
+                print("  ↑ %s (+%d bytes)" % (relpath, delta))
 
     print("upload complete: %d files uploaded (%d bytes), %d unchanged"
           % (uploaded, total_bytes, skipped))
+    if cap_hit.is_set():
+        print("daily ingest cap reached — re-run tomorrow to continue", file=sys.stderr)
 
 
 if __name__ == "__main__":
