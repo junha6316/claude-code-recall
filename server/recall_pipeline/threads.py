@@ -135,6 +135,37 @@ def deterministic_slug(s, registry):
     return None
 
 
+NAME_MATCH_MIN_KEY = 6   # normalized chars; below this, titles are too generic to be identity
+
+
+def norm_title(text):
+    """Comparison key for headline↔thread-name identity (case/space/punct-insensitive)."""
+    return re.sub(r"[^0-9a-z가-힣]+", "", (text or "").lower())
+
+
+def _canonical_of(slug, registry):
+    seen = set()
+    while slug in registry and registry[slug].get("alias_of") and slug not in seen:
+        seen.add(slug)
+        slug = registry[slug]["alias_of"]
+    return slug
+
+
+def name_match_slug(s, registry):
+    """Deterministic prematch: a session whose headline equals an existing
+    thread's name (or one of its recent titles) after normalization belongs to
+    that thread. Exact equality only — paraphrases stay with the LLM; a false
+    merge is worse than a duplicate because alias links are sticky."""
+    key = norm_title(session_headline(s))
+    if len(key) < NAME_MATCH_MIN_KEY:
+        return None
+    for slug, e in registry.items():
+        if norm_title(e.get("name")) == key or \
+                any(norm_title(t) == key for t in e.get("recent_titles", [])):
+            return _canonical_of(slug, registry)
+    return None
+
+
 # ---------- LLM matching ----------
 
 PROMPT = """You classify development work sessions into "work threads".
@@ -233,10 +264,18 @@ def resolve_decision(dec, s, registry):
         if slug and slug in registry:        # prefer an existing thread (or one created earlier in the same batch)
             return slug
         if slug:                             # even without the new flag, create from the slug the LLM gave (avoids fragmentation within the same batch)
+            # A thread with this exact name may exist outside the candidate
+            # window (or was just created in this batch) — join it instead.
+            existing = name_match_slug(s, registry)
+            if existing:
+                return existing
             slug = unique_slug(slug, registry)
             registry[slug] = new_entry(slug, dec.get("name") or session_headline(s))
             return slug
     # fallback: new thread based on branch -> project
+    existing = name_match_slug(s, registry)
+    if existing:
+        return existing
     base = slugify(trackable_branch(s)) or slugify(s.get("project"))
     slug = unique_slug(base, registry)
     registry[slug] = new_entry(slug, session_headline(s))
@@ -377,11 +416,11 @@ def run_threads(ctx: TenantContext, since=None, dry_run=False):
         day_str = day.strftime("%Y-%m-%d")
         sessions = [(sid, s) for sid, s in collect_day(ctx, day) if sid not in processed]
         if sessions:
-            # 1) deterministic pre-matching (branch) + separate out the unmatched
+            # 1) deterministic pre-matching (branch, then exact-name) + separate out the unmatched
             assigned = {}
             unmatched = {}
             for i, (sid, s) in enumerate(sessions, 1):
-                slug = deterministic_slug(s, registry)
+                slug = deterministic_slug(s, registry) or name_match_slug(s, registry)
                 if slug:
                     assigned[sid] = slug
                 else:

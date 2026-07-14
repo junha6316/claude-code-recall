@@ -96,6 +96,7 @@ CLUSTER_PROMPT = """Below is a list of work threads. Group together threads that
 Rules:
 - Only group them when they are clearly the same task/project. Don't group just because they're in the same area (both "DB", both "deployment").
 - A ★ marks an existing group (canonical). If a thread continues that work, use the ★ slug as the canonical and put the slugs to merge in members (prefer growing the existing group).
+- Two ★ groups that are clearly the same work may also be grouped (one as canonical, the other in members).
 - The canonical for each group is the single slug that best represents the work (favor the more inclusive name / most recent activity).
 - Don't put the canonical itself in members. members are the other slugs that will be merged into the canonical.
 - If there's nothing to group, return {{"groups": []}}.
@@ -158,11 +159,9 @@ def cluster(ctx: TenantContext, registry, dry_run):
                 if s in registry and (is_free(registry[s]) or is_canonical(registry[s]))]
         canons = [s for s in live if is_canonical(registry[s])]
         frees = [s for s in live if is_free(registry[s])]
-        if not frees:
-            continue  # nothing free to absorb (existing canonicals are not merged into each other)
         if canons:
-            winner = _elect(canons, registry)   # grow the existing group
-            to_absorb = frees
+            winner = _elect(canons, registry)   # grow the (largest) existing group
+            to_absorb = frees + [s for s in canons if s != winner]
         else:
             winner = _elect(frees, registry)
             to_absorb = [s for s in frees if s != winner]
@@ -172,12 +171,22 @@ def cluster(ctx: TenantContext, registry, dry_run):
         for m in to_absorb:
             if dry_run:
                 print("  [dry] %s ← %s (%s)" % (winner, m, registry[m]["name"]))
-            else:
-                registry[m]["alias_of"] = winner
-                if m not in existing:
-                    registry[winner].setdefault("aliases", []).append(
-                        {"slug": m, "name": registry[m]["name"]})
-                    existing.add(m)
+                linked += 1
+                continue
+            # Merging a losing canonical: keep the alias graph flat —
+            # cluster_members() only follows direct alias_of pointers.
+            for a in registry[m].pop("aliases", []):
+                a_slug = a.get("slug")
+                if a_slug in registry:
+                    registry[a_slug]["alias_of"] = winner
+                if a_slug not in existing:
+                    registry[winner].setdefault("aliases", []).append(a)
+                    existing.add(a_slug)
+            registry[m]["alias_of"] = winner
+            if m not in existing:
+                registry[winner].setdefault("aliases", []).append(
+                    {"slug": m, "name": registry[m]["name"]})
+                existing.add(m)
             linked += 1
     return linked
 
