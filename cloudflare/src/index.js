@@ -11,6 +11,11 @@
 // acceptable while tenants have exactly one token; replace with a D1
 // token→tenant lookup when multi-token support lands.
 import { Container, getContainer } from "@cloudflare/containers";
+// Single source with the Python app (recall_server/ui.py reads the same file).
+// Served from the Worker because an unauthenticated request has no tenant key
+// to route a container by — and booting billable containers for anonymous
+// hits would hand scanners a cost lever.
+import UI_PAGE from "../../server/recall_server/ui_page.html";
 
 export class RecallContainer extends Container {
   defaultPort = 8300;
@@ -42,6 +47,11 @@ async function tenantKey(request) {
 
 export default {
   async fetch(request, env) {
+    if (new URL(request.url).pathname === "/ui" && request.method === "GET") {
+      return new Response(UI_PAGE, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
     const key = await tenantKey(request);
     if (key === null) {
       return new Response("invalid or missing bearer token", { status: 401 });

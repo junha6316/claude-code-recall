@@ -15,6 +15,9 @@
   "name": "recall-server",
   "main": "src/index.js",
   "compatibility_date": "2026-07-01",
+  "rules": [
+    { "type": "Text", "globs": ["**/*.html"], "fallthrough": true }
+  ],
   "containers": [
     {
       "class_name": "RecallContainer",
