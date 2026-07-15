@@ -111,3 +111,31 @@ def check_ingest_budget(ctx: TenantContext, incoming: int, daily_cap: int) -> bo
         json.dump({"date": today, "bytes": used + incoming}, f)
     os.replace(tmp, path)
     return True
+
+
+# ---- built-output upload (local-pipeline migration) ----
+
+def output_target(ctx: TenantContext, relpath: str) -> str:
+    """Validate a built-output path a client may replace wholesale.
+    Allowed layout: state.json (timeline cursor) at the tenant root,
+    work-timeline/<file>, work-timeline/threads/<file>."""
+    parts = relpath.split("/")
+    if not all(_safe_segment(p) for p in parts):
+        raise BadSegment("invalid output path")
+    ok = (relpath == "state.json"
+          or (len(parts) == 2 and parts[0] == "work-timeline")
+          or (len(parts) == 3 and parts[0] == "work-timeline" and parts[1] == "threads"))
+    if not ok:
+        raise BadSegment("path outside the allowed output layout")
+    return os.path.join(ctx.data_root, relpath)
+
+
+def write_output(ctx: TenantContext, relpath: str, data: bytes) -> int:
+    """Full-file replace, atomic (tmp+rename) — outputs are small and whole."""
+    path = output_target(ctx, relpath)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+    return len(data)

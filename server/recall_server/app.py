@@ -208,6 +208,26 @@ async def ingest(project: str, session_file: str, request: Request,
     return {"size": new_size}
 
 
+@app.put("/v1/outputs/{relpath:path}")
+async def put_output(relpath: str, request: Request,
+                     tenant: Tenant = Depends(get_tenant)):
+    """Replace one built-output file (timeline md, threads md/registry/cursor,
+    state.json). Exists to migrate a local pipeline's finished outputs into a
+    tenant; the normal producer of these files is the server build."""
+    data = await request.body()
+    if len(data) > cfg.ingest_max_body_bytes:
+        raise HTTPException(status_code=413, detail="file too large")
+    if not storage.check_ingest_budget(tenant.ctx, len(data), cfg.ingest_daily_byte_cap):
+        raise HTTPException(status_code=429, detail="daily ingest byte cap reached")
+    try:
+        size = storage.write_output(tenant.ctx, relpath, data)
+    except storage.BadSegment as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if r2 is not None:
+        await asyncio.to_thread(r2.push_file, tenant.tenant_id, tenant.ctx, relpath)
+    return {"size": size}
+
+
 @app.post("/v1/build")
 async def build_now(tenant: Tenant = Depends(get_tenant)):
     """Manual build trigger (verification/ops; ingest normally debounces this)."""
