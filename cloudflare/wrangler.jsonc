@@ -15,6 +15,7 @@
   "name": "recall-server",
   "main": "src/index.js",
   "compatibility_date": "2026-07-01",
+  "observability": { "enabled": true, "logs": { "enabled": true } },
   "rules": [
     { "type": "Text", "globs": ["**/*.html"], "fallthrough": true }
   ],

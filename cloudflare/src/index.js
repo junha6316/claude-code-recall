@@ -58,6 +58,14 @@ export default {
     }
     // Same tenant token → same DO id → same container instance.
     const container = getContainer(env.RECALL_CONTAINER, key);
+    // Ops escape hatch: force-destroy this tenant's container instance.
+    // Auth is the routing itself — a token can only reach (and thus reset)
+    // its own DO. Needed when the platform wedges an instance ("The
+    // container is not running" with a stale-healthy DO state, 2026-07-17).
+    if (new URL(request.url).pathname === "/admin/reset-container" && request.method === "POST") {
+      await container.destroy();
+      return new Response("container destroyed; next request restarts it\n");
+    }
     return container.fetch(request);
   },
 };
