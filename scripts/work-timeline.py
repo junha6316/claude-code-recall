@@ -161,6 +161,27 @@ def project_label(cwd, fallback_dirname):
     return seg[-1] if seg and seg[-1] else fallback_dirname
 
 
+def subject_label(tool_paths, project):
+    """Infer which repo the session actually worked on from the file paths its
+    tools touched — sessions often run from ~ (or /tmp) while reading/editing
+    ~/Projects/<repo>. Only <X> right after a "Projects" path segment counts, so
+    unrelated absolute paths don't vote. Returns None when nothing was inferred
+    or it adds nothing over the cwd-derived project label."""
+    counts = {}
+    for p in tool_paths:
+        if "/.claude/" in p:      # transcript/config reads say nothing about the subject
+            continue
+        parts = p.split("/")
+        for i, seg in enumerate(parts[:-1]):
+            if seg.lower() == "projects" and parts[i + 1]:
+                counts[parts[i + 1]] = counts.get(parts[i + 1], 0) + 1
+                break
+    if not counts:
+        return None
+    best = max(counts, key=lambda k: counts[k])
+    return None if best == project else best
+
+
 def collect_sessions(window_start, window_end):
     """Collect prompts where window_start <= ts < window_end, grouped by session."""
     tz = local_tz()
@@ -180,6 +201,7 @@ def collect_sessions(window_start, window_end):
         git_branch = None
         prompts = []        # (local_dt, text) — actual prompts within the window
         assistant_texts = []  # (local_dt, text) — assistant responses within the window (for summary input)
+        tool_paths = []      # file paths touched by tool calls (whole session — subject inference)
         active = False       # was there any activity (user/assistant) within the window
         first_active = None  # time of the first activity within the window
         internal = False     # exclude entirely if this is cron's own summary session
@@ -211,6 +233,18 @@ def collect_sessions(window_start, window_end):
                         if isinstance(rec.get("message"), dict):
                             if extract_text(rec["message"].get("content")).startswith(INTERNAL_MARKER):
                                 internal = True
+                    # Subject inference reads tool_use paths regardless of window:
+                    # which repo a session is about doesn't depend on the time slice.
+                    if t == "assistant" and isinstance(rec.get("message"), dict):
+                        content = rec["message"].get("content")
+                        if isinstance(content, list):
+                            for blk in content:
+                                if isinstance(blk, dict) and blk.get("type") == "tool_use" \
+                                        and isinstance(blk.get("input"), dict):
+                                    for key in ("file_path", "path", "notebook_path"):
+                                        v = blk["input"].get(key)
+                                        if isinstance(v, str) and v.startswith("/"):
+                                            tool_paths.append(v)
 
                     # Determine window membership by activity time (user/assistant messages)
                     if t in ("user", "assistant"):
@@ -250,9 +284,11 @@ def collect_sessions(window_start, window_end):
         if saw_synthetic and not real_assistant:
             continue
         sid = os.path.splitext(os.path.basename(path))[0]
+        proj = project_label(cwd, dirname)
         sessions[sid] = {
             "title": ai_title,
-            "project": project_label(cwd, dirname),
+            "project": proj,
+            "subject": subject_label(tool_paths, proj),
             "branch": git_branch,
             "first_active": first_active,
             "prompts": sorted(prompts, key=lambda x: x[0]),

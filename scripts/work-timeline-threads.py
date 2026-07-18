@@ -157,6 +157,7 @@ if it doesn't fit any of them, create a new thread.
 Rules:
 - Assign each session to exactly one thread.
 - If a session is the same as or a continuation of an existing thread, you must use that slug. When in doubt, prefer an existing thread over creating a new one.
+- `subject=` is the repo the session's tools actually touched; `project=` is only the folder it ran in. A session whose subject matches a thread's subject/project belongs there even if the folders differ.
 - A new thread's slug must be lowercase English with hyphens (kebab-case); name must be a short noun phrase summarizing the work, written in {lang}.
 - Output a single JSON object only. No explanation/markdown/code fences.
 
@@ -182,9 +183,10 @@ def render_threads_block(registry, day_str):
     for e in items:
         recent = "; ".join(e.get("recent_titles", [])[-2:])
         lines.append(
-            "- slug=%s | name=%s | project=%s | branch=%s | last_active=%s | recent work: %s"
+            "- slug=%s | name=%s | project=%s | subject=%s | branch=%s | last_active=%s | recent work: %s"
             % (e["slug"], e["name"],
                ",".join(e.get("projects", [])) or "-",
+               ",".join(e.get("subjects", [])) or "-",
                ",".join(e.get("branches", [])) or "-",
                e.get("last_active", "-"),
                flatten(recent, DIGEST_PROMPT_TRUNC) or "-"))
@@ -197,8 +199,9 @@ def render_sessions_block(unmatched):
         ups = " / ".join(flatten(t, DIGEST_PROMPT_TRUNC)
                          for _, t in s.get("prompts", [])[:MAX_SESSION_PROMPTS])
         br = s.get("branch") if s.get("branch") and s["branch"] != "HEAD" else "-"
-        lines.append('%s) project=%s branch=%s title="%s" input gist: %s'
-                     % (key, s["project"], br, session_headline(s), ups or "-"))
+        lines.append('%s) project=%s subject=%s branch=%s title="%s" input gist: %s'
+                     % (key, s["project"], s.get("subject") or "-", br,
+                        session_headline(s), ups or "-"))
     return "\n".join(lines)
 
 
@@ -231,7 +234,7 @@ def llm_assign(unmatched, registry, day_str):
 # ---------- thread update ----------
 
 def new_entry(slug, name):
-    return {"slug": slug, "name": name, "projects": [], "branches": [],
+    return {"slug": slug, "name": name, "projects": [], "subjects": [], "branches": [],
             "sids": [], "recent_titles": [], "first_active": "", "last_active": "",
             "count": 0}
 
@@ -259,6 +262,9 @@ def update_entry(e, s, sid, day_str):
     proj = s.get("project")
     if proj and proj not in e["projects"]:
         e["projects"].append(proj)
+    subj = s.get("subject")
+    if subj and subj not in e.setdefault("subjects", []):   # setdefault: pre-subject registry entries
+        e["subjects"].append(subj)
     br = trackable_branch(s)
     if br and br not in e["branches"]:
         e["branches"].append(br)
@@ -294,15 +300,20 @@ def render_thread_header(e):
     span = e["first_active"]
     if e["last_active"] and e["last_active"] != e["first_active"]:
         span += " ~ " + e["last_active"]
-    return "\n".join([
+    lines = [
         "# %s" % e["name"],
         "",
         "- slug: `%s`" % e["slug"],
         "- project: %s" % (", ".join(e.get("projects", [])) or "-"),
+    ]
+    if e.get("subjects"):
+        lines.append("- subject: %s" % ", ".join(e["subjects"]))
+    lines += [
         "- branch: %s" % (", ".join("`%s`" % b for b in e.get("branches", [])) or "-"),
         "- span: %s  · %d sessions" % (span, e["count"]),
         "",
-    ])
+    ]
+    return "\n".join(lines)
 
 
 def write_thread(slug, e, new_lines_by_date):
