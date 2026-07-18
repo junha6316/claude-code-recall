@@ -51,7 +51,7 @@ if _seed:
 # R2 persistence (None in local mode — everything below degrades to Phase 1).
 _r2cfg = R2Config.from_env()
 r2 = R2Sync(_r2cfg) if _r2cfg else None
-_pull_locks: dict[str, asyncio.Lock] = {}   # tenant_id -> cold-pull guard
+_pull_tasks: dict[str, asyncio.Task] = {}   # tenant_id -> in-flight/settled cold pull
 
 # Tenant for the in-flight MCP request (set by the auth middleware; contextvars
 # propagate through the ASGI call into the tool handlers).
@@ -71,14 +71,26 @@ def _resolve_token(authorization: str | None) -> Tenant | None:
 
 async def _ensure_warm(tenant: Tenant):
     """Cold container disk (fresh instance after scale-to-zero) → restore the
-    tenant's data from R2 before serving. One pull per tenant at a time."""
+    tenant's data from R2 before serving.
+
+    Single-flight per tenant: every request awaits the SAME pull task, shielded
+    so a client disconnect cancels only the awaiting request, never the pull.
+    (The earlier per-tenant asyncio.Lock tied the pull to the request task —
+    each aborted poll released the lock and the next request spawned another
+    full pull; ~20 piled up on 2026-07-18 and stretched one restore past an
+    hour.) A failed/cancelled task is replaced so the next request retries."""
     if r2 is None or not r2.is_cold(tenant.ctx):
         return
-    lock = _pull_locks.setdefault(tenant.tenant_id, asyncio.Lock())
-    async with lock:
-        if r2.is_cold(tenant.ctx):   # re-check after waiting on the lock
-            n = await asyncio.to_thread(r2.pull_tenant, tenant.tenant_id, tenant.ctx)
-            print("[r2] cold start: restored %d object(s) for %s" % (n, tenant.tenant_id))
+
+    async def pull():
+        n = await asyncio.to_thread(r2.pull_tenant, tenant.tenant_id, tenant.ctx)
+        print("[r2] cold start: restored %d object(s) for %s" % (n, tenant.tenant_id))
+
+    task = _pull_tasks.get(tenant.tenant_id)
+    if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+        task = asyncio.create_task(pull())
+        _pull_tasks[tenant.tenant_id] = task
+    await asyncio.shield(task)
 
 
 async def get_tenant(authorization: str | None = Header(default=None)) -> Tenant:

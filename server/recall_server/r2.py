@@ -21,14 +21,22 @@ working with zero config).
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from recall_pipeline.context import TenantContext
 
 try:
     import boto3
+    from botocore.config import Config as BotoConfig
 except ImportError:      # boto3 only needed when R2 is configured
     boto3 = None
+    BotoConfig = None
+
+# Cold-start restores download the whole tenant prefix (thousands of transcript
+# objects); sequential GETs made wake-up O(corpus) in wall-clock (2026-07-18,
+# 40+ min observed). Bounded fan-out keeps it minutes.
+PULL_WORKERS = int(os.environ.get("RECALL_PULL_WORKERS", "8"))
 
 
 @dataclass
@@ -65,6 +73,9 @@ class R2Sync:
             aws_secret_access_key=cfg.secret_key,
             # R2 ignores region; boto3 wants one.
             region_name="auto",
+            # pull_tenant downloads with PULL_WORKERS threads; the default pool
+            # (10) would serialize them at the connection layer.
+            config=BotoConfig(max_pool_connections=PULL_WORKERS + 2),
         )
 
     # ---- keys ----
@@ -150,18 +161,25 @@ class R2Sync:
         idempotent."""
         paginator = self._s3.get_paginator("list_objects_v2")
         prefix = "tenants/%s/" % tenant_id
-        count = 0
-        for page in paginator.paginate(Bucket=self.cfg.bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                relpath = self._rel(tenant_id, obj["Key"])
-                local = os.path.join(ctx.data_root, relpath)
-                os.makedirs(os.path.dirname(local), exist_ok=True)
-                self._s3.download_file(self.cfg.bucket, obj["Key"], local)
-                count += 1
+        keys = [obj["Key"]
+                for page in paginator.paginate(Bucket=self.cfg.bucket, Prefix=prefix)
+                for obj in page.get("Contents", [])]
+
+        def fetch(key):
+            local = os.path.join(ctx.data_root, self._rel(tenant_id, key))
+            os.makedirs(os.path.dirname(local), exist_ok=True)
+            self._s3.download_file(self.cfg.bucket, key, local)
+
+        # Concurrent downloads: boto3 clients are thread-safe, writes land in
+        # distinct files. Any failure propagates and the warm-marker is not
+        # written, preserving the all-or-cold contract below.
+        with ThreadPoolExecutor(max_workers=PULL_WORKERS) as pool:
+            for _ in pool.map(fetch, keys):
+                pass
         os.makedirs(ctx.data_root, exist_ok=True)   # empty tenant (0 objects)
         with open(self._warm_marker(ctx), "w", encoding="utf-8") as f:
             f.write("")
-        return count
+        return len(keys)
 
     def is_cold(self, ctx: TenantContext) -> bool:
         """Cold = this disk has not yet completed an R2 restore for the tenant.
