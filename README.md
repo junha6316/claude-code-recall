@@ -44,6 +44,34 @@ so summarization runs on your own Claude account.
 
 ## Install
 
+### As a plugin (recommended)
+
+```
+/plugin marketplace add junha6316/claude-code-recall
+/plugin install claude-code-recall@claude-code-recall
+```
+
+That's it — no installer, no launchd/cron. The plugin ships the ingestion hooks
+(`Stop` + `SessionStart`), the recall-gate hook (`UserPromptSubmit`), a
+date-guarded daily synthesis hook (first session of each day runs the rollup /
+threads / consolidate pass), and the `recall` skill. Updates arrive through the
+marketplace.
+
+Configuration is via environment variables (set them in `settings.json` `env`
+or your shell): `CCRECALL_BUCKET_MINUTES` (default 15),
+`CCRECALL_DEBOUNCE_MINUTES` (default bucket/3, ≥2), `CCRECALL_SUMMARY_LANG`
+(default English), `CCRECALL_SUMMARY_MODEL`, `CCRECALL_CLAUDE_BIN`.
+
+macOS/Linux only (the hooks are shell scripts driving `python3`).
+
+**Migrating from a script install**: run `./uninstall.sh` from your clone first
+(or remove the `work-timeline.py --hook` / `recall-gate.py` entries from
+`settings.json` and the `com.ccrecall.*` launchd jobs), then install the
+plugin. If both are active the debounce keeps ingestion correct, but everything
+runs twice.
+
+### With the install script (no plugin system)
+
 ```bash
 git clone https://github.com/junha6316/claude-code-recall
 cd claude-code-recall

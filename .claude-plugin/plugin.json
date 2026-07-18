@@ -1,9 +1,10 @@
 {
   "name": "claude-code-recall",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Time-bucketed work timeline of your Claude Code sessions, plus a recall skill to search 'when did I do what'.",
-  "author": "junha6316",
+  "author": { "name": "junha6316", "url": "https://github.com/junha6316" },
   "homepage": "https://github.com/junha6316/claude-code-recall",
   "license": "MIT",
-  "skills": ["./skills/recall"]
+  "skills": ["./skills/recall"],
+  "hooks": "./hooks/hooks.json"
 }

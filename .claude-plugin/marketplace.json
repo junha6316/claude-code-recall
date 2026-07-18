@@ -1,0 +1,12 @@
+{
+  "name": "claude-code-recall",
+  "description": "Time-bucketed work timeline of your Claude Code sessions, plus a recall skill to search 'when did I do what'.",
+  "owner": { "name": "junha6316", "url": "https://github.com/junha6316" },
+  "plugins": [
+    {
+      "name": "claude-code-recall",
+      "source": "./",
+      "description": "Time-bucketed work timeline of your Claude Code sessions, plus a recall skill to search 'when did I do what'."
+    }
+  ]
+}

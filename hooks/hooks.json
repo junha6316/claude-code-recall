@@ -1,0 +1,47 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PY=/Library/Developer/CommandLineTools/usr/bin/python3; [ -x \"$PY\" ] || PY=python3; \"$PY\" \"${CLAUDE_PLUGIN_ROOT}/scripts/work-timeline.py\" --hook",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PY=/Library/Developer/CommandLineTools/usr/bin/python3; [ -x \"$PY\" ] || PY=python3; \"$PY\" \"${CLAUDE_PLUGIN_ROOT}/scripts/work-timeline.py\" --hook",
+            "async": true
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/daily-synthesis.sh\"",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/recall-gate.py\" 2>/dev/null || true",
+            "timeout": 25,
+            "statusMessage": "recall: checking past work..."
+          }
+        ]
+      }
+    ]
+  }
+}

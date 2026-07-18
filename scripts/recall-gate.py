@@ -15,7 +15,23 @@ import json
 import subprocess
 
 HOME = os.path.expanduser("~")
-RECALL = os.path.join(HOME, ".claude", "skills", "recall", "recall.py")
+
+
+def _find_recall():
+    """recall.py lives beside this script in the plugin layout
+    (<root>/scripts/recall-gate.py + <root>/skills/recall/recall.py); the
+    install.sh layout copies them to separate dirs under CLAUDE_CONFIG_DIR."""
+    plugin = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "skills", "recall", "recall.py")
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+    legacy = os.path.join(config_dir, "skills", "recall", "recall.py")
+    for p in (os.path.normpath(plugin), legacy):
+        if os.path.exists(p):
+            return p
+    return legacy
+
+
+RECALL = _find_recall()
 
 # Recall-question triggers (per the CLAUDE.md recall rule).
 # Compiled case-insensitively, so the English patterns below match regardless
