@@ -348,10 +348,40 @@ def search_raw(ctx: TenantContext, terms, since=None, until=None,
 
 # ---------- text rendering (shared by MCP tools) ----------
 
+# Ambiguity gate. When the leading threads score within this fraction of the
+# top hit, the ranking is not actually deciding anything and rank 1 should not
+# be presented as the answer. Measured over 1572 realistic recall questions:
+# inside this band the top hit is wrong 51% of the time, outside it 2.8%.
+AMBIGUITY_MARGIN = 0.20
+MAX_CANDIDATES = 4          # AskUserQuestion takes at most 4 options
+AMBIGUOUS_MARKER = "[AMBIGUOUS]"
+
+
+def ambiguous_candidates(hits, margin=AMBIGUITY_MARGIN):
+    """Thread hits effectively tied with the leader. Empty when rank 1 is clear."""
+    if len(hits) < 2:
+        return []
+    top = hits[0]["weight"]
+    if top <= 0:
+        return []
+    tied = [h for h in hits if h["weight"] >= top * (1.0 - margin)]
+    return tied[:MAX_CANDIDATES] if len(tied) >= 2 else []
+
+
 def render_results(terms, thread_hits, timeline_hits):
     out = []
     if thread_hits:
         out.append("=== Work threads (%d hits, query: %s) ===\n" % (len(thread_hits), " ".join(terms)))
+        tied = ambiguous_candidates(thread_hits)
+        if tied:
+            out.append(
+                "%s The top %d threads score within %d%% of each other — ranking is "
+                "not deciding between them. Ask which one the user means (offer "
+                "these as options) before answering; do not present the first as "
+                "the answer." % (AMBIGUOUS_MARKER, len(tied), int(AMBIGUITY_MARGIN * 100)))
+            for i, c in enumerate(tied, 1):
+                out.append("  %d. %s   (latest %s)" % (i, c["name"], c["last_date"] or "-"))
+            out.append("")
         for c in thread_hits:
             via = ("  ← merged from: %s" % ", ".join(c["via"])) if c["via"] else ""
             out.append("● %s   (%d/%d terms matched, %d occurrences, latest %s)%s"

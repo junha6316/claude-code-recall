@@ -33,6 +33,10 @@ def _find_recall():
 
 RECALL = _find_recall()
 
+# Kept in sync with recall.py's marker (the gate reads recall's stdout, so it
+# cannot import it — recall.py lives in a skills/ dir that is not a package).
+AMBIGUOUS_MARKER = "[AMBIGUOUS]"
+
 # Recall-question triggers (per the CLAUDE.md recall rule).
 # Compiled case-insensitively, so the English patterns below match regardless
 # of case; the Korean patterns are unaffected by case folding.
@@ -144,14 +148,29 @@ def run(payload):
     except Exception as e:
         recall_out = "(recall failed to run: %s)" % e
 
+    # recall marks a result whose leading threads are indistinguishable. There,
+    # rank 1 is wrong about half the time, so asking beats guessing — and the
+    # candidates are already named, so the question can offer real options
+    # instead of telling the user to "be more specific".
+    if AMBIGUOUS_MARKER in recall_out:
+        directive = (
+            "The search could not separate the leading candidates (see the "
+            "%s line below). Do NOT answer from the top hit. Ask the user which "
+            "thread they mean with AskUserQuestion, using the listed candidates "
+            "as the options, then answer from the one they pick."
+        ) % AMBIGUOUS_MARKER
+    else:
+        directive = (
+            "If the keywords missed the mark or the result is sparse, re-run the "
+            "recall skill yourself with more precise keywords before answering."
+        )
+
     context = (
         "[recall enforcement hook] This prompt was detected as a recall question "
         "about past work. Per the CLAUDE.md recall rule, do not rely on memory or "
         "guessing; answer using the auto-run recall result below as your primary "
-        "source. Auto-extracted keywords: [%s]. If the keywords missed the mark or "
-        "the result is sparse, re-run the recall skill yourself with more precise "
-        "keywords before answering.\n\n--- recall result ---\n%s"
-    ) % (", ".join(kws), recall_out or "(no result)")
+        "source. Auto-extracted keywords: [%s]. %s\n\n--- recall result ---\n%s"
+    ) % (", ".join(kws), directive, recall_out or "(no result)")
 
     return json.dumps({
         "hookSpecificOutput": {
