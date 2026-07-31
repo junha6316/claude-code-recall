@@ -76,9 +76,10 @@ STOP = {
 }
 
 # Strip trailing Korean particles/endings.
+# Longer endings come first so "관련해서" strips to "관련" rather than stalling.
 JOSA = re.compile(
     r"(을|를|이|가|은|는|에|의|로|으로|도|만|와|과|랑|이랑|에서|까지|부터"
-    r"|던거|던|거|게|야|냐|니|네|좀|했|하)+$"
+    r"|해서|해야|하는|한|던거|던|거|게|야|냐|니|네|좀|했|하)+$"
 )
 
 

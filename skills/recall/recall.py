@@ -17,6 +17,7 @@ import os
 import re
 import json
 import glob
+import math
 import argparse
 from datetime import datetime, timedelta
 
@@ -55,9 +56,10 @@ STOP = {
 }
 
 # Trailing Korean particles/endings to strip from Korean tokens.
+# Longer endings come first so "관련해서" strips to "관련" rather than stalling.
 JOSA = re.compile(
     r"(을|를|이|가|은|는|에|의|로|으로|도|만|와|과|랑|이랑|에서|까지|부터"
-    r"|던거|던|거|게|야|냐|니|네|좀|했|하)+$"
+    r"|해서|해야|하는|한|던거|던|거|게|야|냐|니|네|좀|했|하)+$"
 )
 
 
@@ -92,8 +94,31 @@ def terms_of(query):
     return out[:MAX_TERMS]
 
 
-def score(text_lower, terms):
-    """Return (number of distinct matches, total occurrences)."""
+# Weight floor, so a query made only of corpus-common words still ranks by
+# occurrence count instead of collapsing to an all-zero tie.
+WEIGHT_FLOOR = 0.01
+
+
+def term_weights(terms, docs_lower):
+    """Inverse-document-frequency weight per term over the corpus being searched.
+
+    Without this every term counts the same, so a question like
+    "memory-invalidation 관련해서 작업하던거" ranks threads matching the generic
+    "작업" above the one thread that actually contains "memory-invalidation".
+    Words present in most documents collapse toward WEIGHT_FLOOR; rare ones
+    dominate.
+    """
+    n = len(docs_lower)
+    weights = {}
+    for t in terms:
+        df = sum(1 for d in docs_lower if t in d)
+        weights[t] = math.log((n + 1.0) / (df + 1.0)) + WEIGHT_FLOOR
+    return weights
+
+
+def score_weighted(text_lower, terms, weights):
+    """Return (weighted score, distinct matches, total occurrences)."""
+    weighted = 0.0
     distinct = 0
     total = 0
     for t in terms:
@@ -101,7 +126,10 @@ def score(text_lower, terms):
         if c:
             distinct += 1
             total += c
-    return distinct, total
+            # log1p damps repetition so one long document cannot outrank a
+            # genuinely rarer match by sheer term count.
+            weighted += weights.get(t, WEIGHT_FLOOR) * (1.0 + math.log1p(c))
+    return weighted, distinct, total
 
 
 def matched_lines(body, terms):
@@ -140,7 +168,8 @@ def split_blocks(content):
 
 
 def search_timeline(terms, limit):
-    hits = []  # (distinct, total, date, heading, lines)
+    # Collect blocks first: term weights need the whole corpus before scoring.
+    blocks = []  # (date, heading, body, body_lower)
     for path in sorted(glob.glob(os.path.join(TIMELINE_DIR, "[0-9]" * 4 + "-*.md"))):
         date = os.path.splitext(os.path.basename(path))[0]
         try:
@@ -149,11 +178,16 @@ def search_timeline(terms, limit):
         except OSError:
             continue
         for heading, body in split_blocks(content):
-            d, t = score(body.lower(), terms)
-            if d == 0:
-                continue
-            hits.append((d, t, date, heading, matched_lines(body, terms)))
-    hits.sort(key=lambda h: (h[0], h[1], h[2]), reverse=True)
+            blocks.append((date, heading, body, body.lower()))
+
+    weights = term_weights(terms, [b[3] for b in blocks])
+    hits = []  # (weighted, distinct, total, date, heading, lines)
+    for date, heading, body, body_lower in blocks:
+        w, d, t = score_weighted(body_lower, terms, weights)
+        if d == 0:
+            continue
+        hits.append((w, d, t, date, heading, matched_lines(body, terms)))
+    hits.sort(key=lambda h: (h[0], h[2], h[3]), reverse=True)
     return hits[:limit]
 
 
@@ -162,7 +196,7 @@ def print_timeline_hits(hits, terms):
         print("No matches in the timeline. Try --raw to search raw conversations, or change your keywords.")
         return
     print("=== Timeline search results (%d hits, query: %s) ===\n" % (len(hits), " ".join(terms)))
-    for d, t, date, heading, lines in hits:
+    for _w, d, t, date, heading, lines in hits:
         print("● [%s] %s   (%d/%d terms matched, %d occurrences)" % (date, heading, d, len(terms), t))
         for ln in lines:
             print("    %s" % ln)
@@ -199,14 +233,20 @@ def h1_of(content):
 def search_threads(terms, limit, registry):
     """Search threads/<slug>.md, grouping aliases under their canonical and returning the canonical's current state.
     Searching by an old name (alias) resolves to the merged canonical truth."""
-    clusters = {}  # canonical -> aggregation dict
+    # Read every thread first: term weights need the whole corpus before scoring.
+    docs = []  # (path, content, content_lower)
     for path in sorted(glob.glob(os.path.join(THREADS_DIR, "*.md"))):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
         except OSError:
             continue
-        d, t = score(content.lower(), terms)
+        docs.append((path, content, content.lower()))
+    weights = term_weights(terms, [d[2] for d in docs])
+
+    clusters = {}  # canonical -> aggregation dict
+    for path, content, content_lower in docs:
+        w, d, t = score_weighted(content_lower, terms, weights)
         if d == 0:
             continue
         slug = os.path.splitext(os.path.basename(path))[0]
@@ -214,21 +254,21 @@ def search_threads(terms, limit, registry):
         e = registry.get(canonical, {})
         c = clusters.get(canonical)
         if c is None:
-            c = {"d": 0, "t": 0, "lines": [], "path": path, "last_date": "",
+            c = {"w": 0.0, "d": 0, "t": 0, "lines": [], "path": path, "last_date": "",
                  "name": e.get("name") or h1_of(content) or canonical,
                  "current_state": e.get("current_state"), "via": set()}
             clusters[canonical] = c
         if slug != canonical:                       # matched on an alias file
             c["via"].add(registry.get(slug, {}).get("name") or slug)
-        if (d, t) > (c["d"], c["t"]):               # take matched lines from the highest-scoring file
-            c["d"], c["t"] = d, t
+        if (w, t) > (c["w"], c["t"]):               # take matched lines from the highest-scoring file
+            c["w"], c["d"], c["t"] = w, d, t
             c["lines"] = matched_lines(content, terms)
             dates = THREAD_DATE_RE.findall(content)
             c["last_date"] = dates[-1] if dates else ""
         if slug == canonical:                        # display path points to the canonical file
             c["path"] = path
     ranked = sorted(clusters.values(),
-                    key=lambda c: (c["d"], c["t"], c["last_date"]), reverse=True)
+                    key=lambda c: (c["w"], c["t"], c["last_date"]), reverse=True)
     return ranked[:limit]
 
 

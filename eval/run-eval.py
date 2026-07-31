@@ -160,7 +160,7 @@ def answer(case):
         "terms": terms,
         "hits": [{"date": d8, "heading": heading, "score": "%d/%d" % (d, len(terms)),
                   "lines": lines[:2]}
-                 for d, _t, d8, heading, lines in hits],
+                 for _w, d, _t, d8, heading, lines in hits],
     }
 
 
