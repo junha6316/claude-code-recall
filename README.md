@@ -152,12 +152,57 @@ python3 ~/.claude/skills/recall/recall.py "fargate scaling"
 python3 ~/.claude/skills/recall/recall.py "openssl" --raw --since 2026-06-01
 ```
 
+Claude Code moves hook output longer than 10,000 characters to a file and shows
+Claude only a short preview, so the auto-injected result is capped at 9,500
+(counted the way Claude Code counts, where an emoji is 2). A result that fits is
+injected unchanged. A longer one is shortened: up to the first 3 work threads and
+first 5 timeline hits (every candidate thread, when recall flags the top threads
+as ambiguous) are shown in full, in rank order while they fit: once one doesn't
+fit, the lower-ranked ones in that section are not shown in full either. The rest
+collapse to their `●` header line (threads keep their `↳` file path). The picked
+entries get the space first; the other entries' headers fill what is left, and the
+ones that no longer fit are dropped with a per-section count. A footer then tells
+Claude how many results are shown in full and how to get the rest: rerun
+`recall.py` with the same keywords, or read the `↳` thread file or
+`~/.claude/work-timeline/<date>.md`.
+
+### Optional: Jev relevance filter
+
+Instead of rank order, the gate can ask TypeSafe's [Jev](https://docs.typesafe.ai/models)
+model which result blocks actually answer your prompt: at most one request per
+auto-recall, sent only when the result needs shortening, with one yes/no relevance
+question per block. Blocks Jev scores at 0.3 or higher are picked for full text in
+place of the first 3 threads / 5 timeline hits (a deliberately low bar: Jev is less
+accurate on non-English text, and missing a relevant block costs more than keeping
+an extra one). The 9,500 cap still applies, and so does the in-section
+stop: once a picked block doesn't fit, the picked ones after it stay collapsed.
+
+It is opt-in. Set `CCRECALL_TYPESAFE_API_KEY` where hooks can see it, e.g. in
+`settings.json`:
+
+```json
+{ "env": { "CCRECALL_TYPESAFE_API_KEY": "<your key>" } }
+```
+
+A generic `TYPESAFE_API_KEY` is ignored on purpose, so sending recall data out is
+always an explicit choice. Jev charges for input tokens only, $0.042 per 1M
+([TypeSafe's models page](https://docs.typesafe.ai/models)); a request is at most
+64k tokens, so each check costs well under a cent. It fails open: on any error, a
+4-second timeout, or if Jev marks nothing relevant, the gate falls back to rank
+order and notes it in the footer. Read *Privacy & secrets* before enabling it.
+
 ## ⚠️ Privacy & secrets
 
 The timeline contains **raw prompt text**, which can include tokens, passwords, and
 other secrets/PII that appeared in your conversations. `~/.claude/work-timeline/` is
 private to your machine. **Do not commit or sync it anywhere public.** This repo's
 `.gitignore` already excludes timeline data, logs, and state files.
+
+- **Jev relevance filter (opt-in):** when `CCRECALL_TYPESAFE_API_KEY` is set, your
+  prompt and the matched recall blocks (timeline text, so possibly secrets too) are
+  sent to TypeSafe (`api.typesafe.ai`). Per [TypeSafe's docs](https://docs.typesafe.ai/legal),
+  zero data retention (ZDR) is offered only to enterprise customers. With the key
+  unset, the gate makes no TypeSafe call.
 
 ## Measuring search quality
 
