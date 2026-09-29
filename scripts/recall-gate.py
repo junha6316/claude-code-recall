@@ -75,7 +75,8 @@ JEV_CRITERIA = {
 TRIGGERS = [
     # Korean
     r"기억\s*(?:해|나|하|남|할|했)",
-    r"전에",
+    # Not after "~하기" ("실행하기 전에" = before running it), which is about now.
+    r"(?<!기)(?<!기\s)전에",
     r"예전",
     r"지난\s*번",
     r"저번",
@@ -85,7 +86,6 @@ TRIGGERS = [
     r"했었",
     r"하던\s*거",
     r"만들던",
-    r"\b전에\b",
     # English
     r"when did i",
     r"when did we",

@@ -186,6 +186,12 @@ class TriggerTest(unittest.TestCase):
         self.assert_skipped('크레딧을 줬대\n<pasted_content id="90d7">\n'
                             'as we discussed last time')
 
+    def test_before_doing_is_not_a_recall_cue(self):
+        self.assert_skipped("오케이, 작업하기 전에 확인해야되는거 있어?")
+        self.assert_skipped("terraform apply 실행하기전에 검토 할거 있나")
+        # A time before now still is.
+        self.assertEqual(self.recall_query("며칠 전에 fargate 비용 확인"), "며칠 fargate 비용 확인")
+
     def test_paste_dropped_from_keywords(self):
         q = self.recall_query('<pasted_content id="64db">\nAWS access key 평문 노출\n'
                               '</pasted_content id="64db">\n\n faster pymysql 기억나?')
