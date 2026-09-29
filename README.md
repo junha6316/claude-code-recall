@@ -148,9 +148,12 @@ Just ask Claude naturally — *"when did I work on X?"*, *"what was that error l
 time?"* — and the hook runs `recall` for you. Or run it directly:
 
 ```bash
-python3 ~/.claude/skills/recall/recall.py "fargate scaling"
-python3 ~/.claude/skills/recall/recall.py "openssl" --raw --since 2026-06-01
+R=~/.claude/plugins/cache/claude-code-recall/claude-code-recall/<version>/skills/recall
+python3 "$R/recall.py" "fargate scaling"
+python3 "$R/recall.py" "openssl" --raw --since 2026-06-01
 ```
+
+`R` above is the plugin install; with `install.sh` it is `~/.claude/skills/recall`.
 
 Claude Code moves hook output longer than 10,000 characters to a file and shows
 Claude only a short preview, so the auto-injected result is capped at 9,500
