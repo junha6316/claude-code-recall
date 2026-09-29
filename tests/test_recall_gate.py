@@ -156,6 +156,51 @@ class TriggerTest(unittest.TestCase):
         self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
         self.assertIn("--- recall result shortened", ctx)
 
+    def assert_skipped(self, prompt):
+        with mock.patch.object(gate.subprocess, "run") as run:
+            self.assertIsNone(gate.run({"prompt": prompt}))
+            run.assert_not_called()
+
+    def recall_query(self, prompt):
+        """The keyword string the gate passes to recall.py for prompt."""
+        with mock.patch.dict(os.environ, env_without_key(), clear=True), \
+                mock.patch.object(gate.subprocess, "run",
+                                  return_value=mock.Mock(stdout="")) as run:
+            self.assertIsNotNone(gate.run({"prompt": prompt}))
+        return run.call_args[0][0][-1]
+
+    def test_internal_summary_prompt_skipped(self):
+        # The plugin's own claude -p prompts quote user prompts, triggers included.
+        self.assert_skipped("[work-timeline-internal]\nBelow are the work sessions"
+                            "\n- 10:02 통화 음성 파일 형식 고민했던거 기억나?")
+
+    def test_agent_message_skipped(self):
+        self.assert_skipped('Another Claude session sent a message:\n'
+                            '<agent-message from="a1addb8352149c265">\n'
+                            '[Subagent hand-back] 전에 했던 작업 결과입니다.')
+
+    def test_trigger_only_inside_paste_skipped(self):
+        self.assert_skipped('<pasted_content id="c40b">\n지난번에 이어서 CTranslate2 '
+                            '최적화를 한다.\n</pasted_content id="c40b">\n')
+        # Cut off before its closing tag: still pasted text to the end.
+        self.assert_skipped('크레딧을 줬대\n<pasted_content id="90d7">\n'
+                            'as we discussed last time')
+
+    def test_paste_dropped_from_keywords(self):
+        q = self.recall_query('<pasted_content id="64db">\nAWS access key 평문 노출\n'
+                              '</pasted_content id="64db">\n\n faster pymysql 기억나?')
+        self.assertEqual(q, "faster pymysql")
+
+    def test_url_and_path_reduced_to_last_segment(self):
+        kw = gate.extract_keywords
+        self.assertEqual(kw("https://github.com/yplabs-ltd/engineering-handbook 이거 기억나?"),
+                         ["engineering-handbook"])
+        self.assertEqual(kw("https://github.com/o/r/pull/6119/ 이거 기억나?"), ["6119"])
+        self.assertEqual(kw("~/Projects/connecting/docs/sendbird-message-archive-design.md "
+                            "이거 기억나?"), ["sendbird-message-archive-design"])
+        # Only a token that starts as a URL or path; a slash inside a word stays a split.
+        self.assertEqual(kw("dev/qa env-on 기억나?"), ["dev", "qa", "env-on"])
+
 
 class ShapeTest(unittest.TestCase):
     def setUp(self):

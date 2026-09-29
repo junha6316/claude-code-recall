@@ -131,10 +131,32 @@ SYSTEM_WRAPPER_PREFIXES = (
     "<bash-stdout",
     "[Request interrupted",
     "Caveat:",
+    # This plugin's own summary prompts (headless claude -p). They quote user
+    # prompts, so recall questions inside them would trip the triggers.
+    "[work-timeline-internal]",
+    # A report handed back by a subagent or another session.
+    "Another Claude session sent a message:",
+    "<agent-message",
 )
+
+# Pasted text (logs, handoff notes, emails) is not the question itself. Its words
+# would trip the triggers and fill the keyword slots, so it is dropped first.
+# The closing tag carries the same id; an unclosed block runs to the end.
+PASTE_RE = re.compile(
+    r'<pasted_content id="([^"]*)">.*?(?:</pasted_content id="\1">|\Z)', re.S)
+
+# A URL or file path is reduced to its last segment (PR number, doc id, file
+# name). Left whole, its scheme, host and directories take every keyword slot.
+LOCATOR_RE = re.compile(r"(?<!\S)(?:https?://|~/|/)\S+")
+
+
+def _last_segment(m):
+    seg = m.group(0).rstrip("/").rsplit("/", 1)[-1]
+    return os.path.splitext(seg)[0]
 
 
 def extract_keywords(prompt):
+    prompt = LOCATOR_RE.sub(_last_segment, prompt)
     raw = re.split(r"[\s,.;:!?()\[\]{}<>'\"`~/\\|=&]+", prompt)
     kws = []
     for tok in raw:
@@ -399,10 +421,11 @@ def shape(recall_out, prompt, kws):
 def run(payload):
     """Return the JSON string to inject when a recall trigger matches, else None."""
     prompt = payload.get("prompt") or payload.get("user_prompt") or ""
-    if not prompt.strip() or not TRIG_RE.search(prompt):
-        return None
     if prompt.lstrip().startswith(SYSTEM_WRAPPER_PREFIXES):
         return None  # harness-injected content, not a user question
+    prompt = PASTE_RE.sub(" ", prompt)
+    if not prompt.strip() or not TRIG_RE.search(prompt):
+        return None
     kws = extract_keywords(prompt)
     if not kws:
         return None
