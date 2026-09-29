@@ -21,6 +21,8 @@ Two layers are searched:
 
 (`$CONFIG` = `$CLAUDE_CONFIG_DIR` if set, else `~/.claude`.)
 
+`<skill dir>` below is the "Base directory for this skill" path shown above this file. It differs between a plugin install and an `install.sh` install, so always take it from there.
+
 ## Procedure
 
 ### Step 1 — search the timeline (the answer is almost always here)
@@ -30,7 +32,7 @@ the distinctive tokens (service / project / error / tool names, e.g. `fargate`,
 `openssl`, `alert`).
 
 ```
-python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/recall/recall.py" "<terms>"
+python3 "<skill dir>/recall.py" "<terms>"
 ```
 
 - Separate multiple terms with spaces. Blocks that match more of the terms sort to the top (partial matches still show).
@@ -44,7 +46,7 @@ python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/recall/recall.py" "<terms>"
 After Step 1 gives you a date, narrow to that range and search the raw transcripts:
 
 ```
-python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/recall/recall.py" "<terms>" --raw --since YYYY-MM-DD [--until YYYY-MM-DD] [--project NAME]
+python3 "<skill dir>/recall.py" "<terms>" --raw --since YYYY-MM-DD [--until YYYY-MM-DD] [--project NAME]
 ```
 
 - `--raw` returns only messages that contain **all** of the terms (AND). Don't pass too many terms.
