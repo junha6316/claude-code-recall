@@ -194,6 +194,18 @@ always an explicit choice. Jev charges for input tokens only, $0.042 per 1M
 4-second timeout, or if Jev marks nothing relevant, the gate falls back to rank
 order and notes it in the footer. Read *Privacy & secrets* before enabling it.
 
+### Gate log
+
+The hook's errors go to `/dev/null`, so the gate keeps its own log:
+`~/.claude/scripts/recall-gate.log`, one JSON line per prompt that trips a
+trigger. It records the start of the prompt, the keywords, recall's run time and
+result length (plus why recall failed to run, if it did), and whether the result
+was cut. A prompt with no keywords to search is logged as skipped, without
+running recall. A cut result also records how many blocks are shown in full and
+Jev's outcome (`picked`, `none relevant`, `failed: <reason>`, or `off` with no
+key), plus its run time when a request was sent. A crash in the gate gets a line
+of its own.
+
 ## ⚠️ Privacy & secrets
 
 The timeline contains **raw prompt text**, which can include tokens, passwords, and
@@ -206,6 +218,9 @@ private to your machine. **Do not commit or sync it anywhere public.** This repo
   sent to TypeSafe (`api.typesafe.ai`). Per [TypeSafe's docs](https://docs.typesafe.ai/legal),
   zero data retention (ZDR) is offered only to enterprise customers. With the key
   unset, the gate makes no TypeSafe call.
+- **Gate log:** `~/.claude/scripts/recall-gate.log` holds the first 100 characters
+  and the keywords of each prompt that trips a trigger, so treat it like the
+  timeline.
 
 ## Measuring search quality
 

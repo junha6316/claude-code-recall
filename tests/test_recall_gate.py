@@ -10,8 +10,10 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -36,6 +38,15 @@ TERMS = ["fargate", "cost"]
 KWS = ["fargate", "cost"]
 PROMPT = "지난번에 fargate cost 줄이던 거 뭐였지"
 RERUN = "python3 %s %s" % (shlex.quote(gate.RECALL), shlex.quote("fargate cost"))
+
+
+def setUpModule():
+    # gate.run()마다 로그가 남으니 실제 설정 폴더 대신 임시 폴더에 쓴다.
+    log_dir = tempfile.mkdtemp()
+    unittest.addModuleCleanup(shutil.rmtree, log_dir)
+    p = mock.patch.object(gate, "LOG", os.path.join(log_dir, "scripts", "recall-gate.log"))
+    p.start()
+    unittest.addModuleCleanup(p.stop)
 
 
 def recall_output(n_threads, n_timeline, lines_per=4, line_len=100, tied=False,
@@ -498,6 +509,107 @@ class JevTest(unittest.TestCase):
         ctx = gate.shape(out, PROMPT, KWS)
         self.assertEqual(jev.requests, [])
         self.assertTrue(ctx.endswith("--- recall result ---\n" + out))
+
+
+class LogTest(unittest.TestCase):
+    def setUp(self):
+        if os.path.exists(gate.LOG):
+            os.remove(gate.LOG)
+
+    def entries(self):
+        if not os.path.exists(gate.LOG):
+            return []
+        with open(gate.LOG, encoding="utf-8") as f:
+            return [json.loads(ln) for ln in f]
+
+    def jev_env(self, respond):
+        jev = JevMock(respond)
+        self.addCleanup(jev.close)
+        p = mock.patch.object(gate, "JEV_URL", jev.url)
+        p.start()
+        self.addCleanup(p.stop)
+        return env_without_key(**{gate.JEV_KEY_ENV: "test-key"})
+
+    def run_gate(self, recall_out, env=None):
+        with mock.patch.dict(os.environ, env or env_without_key(), clear=True), \
+                mock.patch.object(gate.subprocess, "run",
+                                  return_value=mock.Mock(stdout=recall_out + "\n")):
+            return gate.run({"prompt": PROMPT})
+
+    def test_트리거가_없으면_기록하지_않는다(self):
+        gate.run({"prompt": "add a dark mode toggle to settings"})
+        self.assertEqual(self.entries(), [])
+
+    def test_한도_안의_결과도_한_줄_기록한다(self):
+        out = recall_output(2, 3)
+        self.run_gate(out)
+        [e] = self.entries()
+        self.assertEqual(e["prompt"], PROMPT)
+        self.assertEqual(e["kws"], gate.extract_keywords(PROMPT))
+        self.assertEqual(e["result_len"], gate.ulen(out))
+        self.assertIsInstance(e["recall_ms"], int)
+        self.assertFalse(e["cut"])
+        self.assertNotIn("jev", e)
+
+    def test_줄인_결과는_고른_방식을_기록한다(self):
+        env = self.jev_env(scored({"b1": 0.9, "b4": 0.8}))
+        ctx = json.loads(self.run_gate(medium(), env))["hookSpecificOutput"]["additionalContext"]
+        [e] = self.entries()
+        self.assertTrue(e["cut"])
+        self.assertEqual(e["jev"], "picked")
+        self.assertIsInstance(e["jev_ms"], int)
+        self.assertIn("%d of %d results are shown in full" % (e["full"], e["total"]), ctx)
+
+    def test_Jev_결과별로_기록한다(self):
+        self.run_gate(medium(), self.jev_env(scored({})))
+        self.run_gate(medium(), self.jev_env(lambda body: (500, b"{}")))
+        self.run_gate(medium())  # 키 없음: 요청하지 않는다
+        none, failed, off = self.entries()
+        self.assertEqual(none["jev"], "none relevant")
+        self.assertEqual(failed["jev"], "failed: HTTP 500")
+        self.assertEqual(off["jev"], "off")
+        self.assertIsInstance(none["jev_ms"], int)
+        self.assertIsInstance(failed["jev_ms"], int)
+        self.assertNotIn("jev_ms", off)
+
+    def test_키워드가_없어도_기록한다(self):
+        self.assertIsNone(gate.run({"prompt": "그때 그거 기억나?"}))
+        [e] = self.entries()
+        self.assertEqual(e["skip"], "no keywords")
+
+    def test_recall_실행_실패를_기록한다(self):
+        with mock.patch.dict(os.environ, env_without_key(), clear=True), \
+                mock.patch.object(gate.subprocess, "run", side_effect=OSError("boom")):
+            self.assertIsNotNone(gate.run({"prompt": PROMPT}))
+        [e] = self.entries()
+        self.assertEqual(e["recall_err"], "boom")
+
+    def test_짝_없는_서로게이트도_기록하고_주입한다(self):
+        # JS 문자열에서 온 "\ud800"은 UTF-8로 못 쓴다. 기록이 막혀도 주입은 돼야 한다.
+        prompt = PROMPT + " \ud800"
+        with mock.patch.dict(os.environ, env_without_key(), clear=True), \
+                mock.patch.object(gate.subprocess, "run", return_value=mock.Mock(stdout="")):
+            self.assertIsNotNone(gate.run({"prompt": prompt}))
+        [e] = self.entries()
+        self.assertEqual(e["prompt"], prompt)
+
+    def test_기록할_수_없어도_주입은_된다(self):
+        blocker = os.path.join(os.path.dirname(gate.LOG), "not-a-dir")
+        os.makedirs(os.path.dirname(blocker), exist_ok=True)
+        open(blocker, "w").close()
+        self.addCleanup(os.remove, blocker)
+        with mock.patch.object(gate, "LOG", os.path.join(blocker, "recall-gate.log")):
+            self.assertIsNotNone(self.run_gate(recall_output(2, 3)))
+
+    def test_예외가_나도_출력은_없고_기록은_남는다(self):
+        out = io.StringIO()
+        with mock.patch.object(gate, "run", side_effect=RuntimeError("bad")), \
+                mock.patch.object(gate.sys, "stdin", io.StringIO("{}")), \
+                contextlib.redirect_stdout(out):
+            gate.main()
+        self.assertEqual(out.getvalue(), "")
+        [e] = self.entries()
+        self.assertEqual(e["error"], "RuntimeError: bad")
 
 
 if __name__ == "__main__":

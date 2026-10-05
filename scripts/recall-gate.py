@@ -14,6 +14,7 @@ import re
 import json
 import shlex
 import subprocess
+import time
 import urllib.error
 import urllib.request
 
@@ -38,6 +39,12 @@ RECALL = _find_recall()
 # Same directory recall.py searches; named in the footer as a full-text source.
 TIMELINE_DIR = os.path.join(
     os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude"), "work-timeline")
+# One JSON line per prompt that trips a trigger: keywords, timings, whether the
+# result was cut and how blocks were picked, and any error — the hook's stderr
+# goes to /dev/null, so this is the only trace. Beside work-timeline.log.
+LOG = os.path.join(
+    os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude"), "scripts",
+    "recall-gate.log")
 
 # Kept in sync with recall.py's marker (the gate reads recall's stdout, so it
 # cannot import it — recall.py lives in a skills/ dir that is not a package).
@@ -266,6 +273,19 @@ def jev_scores(prompt, passages):
         return None, (str(reason) or type(e).__name__)[:120]
 
 
+def log(entry):
+    # Never raises: run() logs before it returns, so a failed write would cost
+    # the injection. A lone surrogate in the prompt (JSON "\ud800") is written
+    # as its \u escape, which keeps the line valid JSON.
+    try:
+        entry["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a", encoding="utf-8", errors="backslashreplace") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def footer(n_full, n_total, n_unfit, omitted, how, note, kws):
     """omitted: {"thread": n, "timeline": n} — blocks with not even a header shown."""
     lines = [
@@ -288,14 +308,16 @@ def footer(n_full, n_total, n_unfit, omitted, how, note, kws):
     return "\n".join(lines)
 
 
-def shape(recall_out, prompt, kws):
+def shape(recall_out, prompt, kws, stats=None):
     """Build the additionalContext for a recall result, at most CONTEXT_BUDGET
     UTF-16 units.
 
     A result that fits is injected exactly as printed, with no footer. Over the
     cap, blocks picked for full text (rank order, or Jev relevance when
     enabled) are shown whole while they fit; the others collapse to their
-    header, and a footer says how to get the full text."""
+    header, and a footer says how to get the full text. stats, when given,
+    receives what happened (for the log)."""
+    stats = {} if stats is None else stats
     # recall marks a result whose leading threads are indistinguishable. There,
     # rank 1 is wrong about half the time, so asking beats guessing — and the
     # candidates are already named, so the question can offer real options
@@ -320,7 +342,8 @@ def shape(recall_out, prompt, kws):
         "source. Auto-extracted keywords: [%s]. %s\n\n--- recall result ---\n"
     ) % (", ".join(kws), directive)
     whole = head + (recall_out or "(no result)")
-    if ulen(whole) <= CONTEXT_BUDGET:
+    stats["cut"] = ulen(whole) > CONTEXT_BUDGET
+    if not stats["cut"]:
         return whole
 
     items = parse_items(recall_out)
@@ -344,7 +367,11 @@ def shape(recall_out, prompt, kws):
     how = "rank order (up to the first %d threads and %d timeline hits)" % (
         limit["thread"], limit["timeline"])
     upgrade_order = blocks
+    t0 = time.time()
     scores, err = jev_scores(prompt, ["\n".join(items[i][1]).rstrip("\n") for i in blocks])
+    stats["jev"] = "off"
+    if scores is not None or err:
+        stats["jev_ms"] = int((time.time() - t0) * 1000)
     if scores is not None:
         relevant = {i for i, s in zip(blocks, scores) if s >= JEV_KEEP}
         if relevant:
@@ -352,10 +379,13 @@ def shape(recall_out, prompt, kws):
             # Jev usually picks more than fits; the most relevant get full text first.
             score_of = dict(zip(blocks, scores))
             upgrade_order = sorted(blocks, key=lambda i: -score_of[i])
+            stats["jev"] = "picked"
         else:
             note = "(Jev marked no result relevant; used rank order.)"
+            stats["jev"] = "none relevant"
     elif err:
         note = "(Jev relevance check failed: %s; used rank order.)" % err
+        stats["jev"] = "failed: " + err
 
     # Budget: verbatim text and a worst-case footer are fixed. Chosen blocks get
     # their collapsed form first, then full text in order (rank, or Jev score
@@ -400,6 +430,7 @@ def shape(recall_out, prompt, kws):
         out += lines if kind == "text" else shown.get(i, [])
     body = "\n".join(out).rstrip()
     full = {i for i in shown if shown[i] == items[i][1]}
+    stats["full"], stats["total"] = len(full), n
     tail = ""
     if len(full) < n:
         # A picked block left out entirely counts as omitted, not also as collapsed.
@@ -427,8 +458,12 @@ def run(payload):
     if not prompt.strip() or not TRIG_RE.search(prompt):
         return None
     kws = extract_keywords(prompt)
+    entry = {"prompt": prompt.strip()[:100], "kws": kws}
     if not kws:
+        entry["skip"] = "no keywords"
+        log(entry)
         return None
+    t0 = time.time()
     try:
         res = subprocess.run(
             ["python3", RECALL, " ".join(kws)],
@@ -437,11 +472,16 @@ def run(payload):
         recall_out = res.stdout.strip()
     except Exception as e:
         recall_out = "(recall failed to run: %s)" % e
+        entry["recall_err"] = str(e)[:200]
+    entry["recall_ms"] = int((time.time() - t0) * 1000)
+    entry["result_len"] = ulen(recall_out)
+    ctx = shape(recall_out, prompt, kws, entry)
+    log(entry)
 
     return json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": shape(recall_out, prompt, kws),
+            "additionalContext": ctx,
         }
     }, ensure_ascii=False)
 
@@ -455,8 +495,8 @@ def main():
         out = run(payload)
         if out:
             print(out)
-    except Exception:
-        pass
+    except Exception as e:
+        log({"error": ("%s: %s" % (type(e).__name__, e))[:300]})
 
 
 if __name__ == "__main__":
