@@ -222,7 +222,7 @@ class TriggerTest(unittest.TestCase):
     def test_english_recall_questions_trigger_and_keep_topic_words(self):
         cases = {
             "do you remember when we set up the fargate autoscaling?":
-                ["set", "up", "fargate", "autoscaling"],
+                ["set", "fargate", "autoscaling"],
             "remember the redis timeout fix?": ["redis", "timeout", "fix"],
             "Remember how we sharded the users table?": ["sharded", "users", "table"],
             "I can't remember how we sharded the users table": ["sharded", "users", "table"],

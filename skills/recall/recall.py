@@ -60,6 +60,8 @@ STOP = {
     "remember", "before", "earlier", "previously", "ago", "while", "last",
     "time", "yesterday", "night", "day", "days", "week", "weeks", "month",
     "months", "year", "years", "few", "several", "couple", "happened", "from",
+    # Particles of "set up", "figure out", "turn off", "look into".
+    "up", "out", "off", "into",
     # What is left of "wasn't" or "we've" once the apostrophe splits it.
     "doesn", "isn", "wasn", "aren", "weren", "haven", "hasn", "hadn", "couldn",
     "wouldn", "shouldn", "ve", "ll", "re",
@@ -108,6 +110,21 @@ def terms_of(query):
 # occurrence count instead of collapsing to an all-zero tie.
 WEIGHT_FLOOR = 0.01
 
+# A short Latin term ("set", "up", "ai", "rds") as a plain substring hits
+# unrelated words (setup, update, detail, records), and in a mostly non-English
+# corpus those hits even get a high weight. Such terms match whole words only,
+# with an optional plural "s"; Korean stems and longer terms stay substrings.
+SHORT_LATIN = re.compile(r"[a-z0-9]{1,3}")
+
+
+def count_term(text_lower, t):
+    """Occurrences of term t in text_lower, by the matching rule above."""
+    if t not in text_lower:  # most documents lack the term; skip the slower regex scan
+        return 0
+    if SHORT_LATIN.fullmatch(t):
+        return len(re.findall(r"(?<![a-z0-9])%ss?(?![a-z0-9])" % re.escape(t), text_lower))
+    return text_lower.count(t)
+
 
 def term_weights(terms, docs_lower):
     """Inverse-document-frequency weight per term over the corpus being searched.
@@ -121,7 +138,7 @@ def term_weights(terms, docs_lower):
     n = len(docs_lower)
     weights = {}
     for t in terms:
-        df = sum(1 for d in docs_lower if t in d)
+        df = sum(1 for d in docs_lower if count_term(d, t))
         weights[t] = math.log((n + 1.0) / (df + 1.0)) + WEIGHT_FLOOR
     return weights
 
@@ -132,7 +149,7 @@ def score_weighted(text_lower, terms, weights):
     distinct = 0
     total = 0
     for t in terms:
-        c = text_lower.count(t)
+        c = count_term(text_lower, t)
         if c:
             distinct += 1
             total += c
@@ -146,7 +163,7 @@ def matched_lines(body, terms):
     out = []
     for line in body.splitlines():
         low = line.lower()
-        if any(t in low for t in terms):
+        if any(count_term(low, t) for t in terms):
             s = " ".join(line.split())
             if not s or s.startswith("##"):
                 continue
@@ -439,7 +456,7 @@ def search_raw(terms, since, until, project, limit):
                     if not text:
                         continue
                     low = text.lower()
-                    if not all(t in low for t in terms):
+                    if not all(count_term(low, t) for t in terms):
                         continue
                     proj = project_of(path, cwd)
                     if project and project.lower() not in proj.lower():

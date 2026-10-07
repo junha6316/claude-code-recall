@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Tests for the file line ranges skills/recall/recall.py attaches to timeline hits.
+"""Tests for skills/recall/recall.py: term matching, and the file line ranges it
+attaches to timeline hits.
 
 Run: python3 -m unittest discover -s tests -v
 """
@@ -35,6 +36,37 @@ class BlockSpanTest(unittest.TestCase):
         content = "## a\nfoo ## b\n"
         self.assertEqual(len(recall.split_blocks(content)), 2)
         self.assertIsNone(recall.block_spans(content))
+
+
+class TermMatchTest(unittest.TestCase):
+    def test_short_latin_term_matches_whole_words_and_plural(self):
+        text = "setup settings dataset reset set sets set-up set을 offset"
+        self.assertEqual(recall.count_term(text, "set"), 4)  # set, sets, set(-up), set(을)
+        self.assertEqual(recall.count_term("ai detail maintain ai-generated", "ai"), 2)
+        self.assertEqual(recall.count_term("2026-08-22 2022 220", "22"), 1)
+
+    def test_longer_and_korean_terms_stay_substrings(self):
+        self.assertEqual(recall.count_term("fargate-spot fargatespot", "fargate"), 2)
+        self.assertEqual(recall.count_term("autoscaling autoscaler", "autoscal"), 2)
+        self.assertEqual(recall.count_term("게이트웨이 장애", "게이트웨"), 1)
+
+    def test_generic_short_word_no_longer_outranks_the_topic(self):
+        # "fargate" is common here and "set" is rare, so "set" weighs most. As a
+        # substring, "setup"/"settings" counted as "set" and put the noise first.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        files = {"noise.md": "# Tooling\n\n" + "- setup settings dataset reset\n" * 20,
+                 "fargate.md": "# Fargate scaling\n\n- set fargate autoscaling target\n"}
+        for i in range(3):
+            files["cost%d.md" % i] = "# Fargate cost %d\n\n- fargate autoscaling 비용\n" % i
+        for name, body in files.items():
+            with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                f.write(body)
+        with mock.patch.object(recall, "THREADS_DIR", d):
+            hits = recall.search_threads(["set", "fargate", "autoscaling"], 10, {})
+        names = [h["name"] for h in hits]
+        self.assertEqual(names[0], "Fargate scaling")
+        self.assertNotIn("Tooling", names)
 
 
 class TimelineHitTest(unittest.TestCase):
