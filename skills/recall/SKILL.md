@@ -38,6 +38,7 @@ python3 "<skill dir>/recall.py" "<terms>"
 - Separate multiple terms with spaces. Blocks that match more of the terms sort to the top (partial matches still show).
 - Full sentences are tolerated (the tool drops particles/stopwords itself), but curated keywords rank better.
 - Use the result's `[date] section` + matched prompts to tell the user **when / which project / what happened**.
+- Each hit ends with a `↳` file. For a timeline hit it also gives the entry's line range: **Read** just those lines for the full entry.
 - If nothing lands, retry with the **canonical tokens the log would have used**: official service/tool names, English abbreviations (`GSC`, not "검색 노출"), exact error strings — or switch language (Korean↔English). Retry at least once before giving up.
 - If the output starts with an `[AMBIGUOUS]` line, the leading threads are tied and rank 1 is wrong about half the time. Don't answer from the top hit — ask the user which of the listed candidates they mean (AskUserQuestion, candidates as options), then answer from their pick.
 

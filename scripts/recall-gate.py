@@ -4,8 +4,9 @@
 UserPromptSubmit hook — enforce the recall rule.
 
 If a user prompt matches a "recall past work" pattern, automatically run
-recall.py and inject its result into the context, enforcing the instruction:
-"don't guess from memory, answer based on the recall result."
+recall.py and inject a reading list of its hits (header, one excerpt line and
+file pointer each), enforcing the instruction: "don't guess from memory, read
+the listed entries and answer from them."
 If no trigger matches, output nothing (no injection).
 """
 import sys
@@ -36,11 +37,8 @@ def _find_recall():
 
 
 RECALL = _find_recall()
-# Same directory recall.py searches; named in the footer as a full-text source.
-TIMELINE_DIR = os.path.join(
-    os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude"), "work-timeline")
-# One JSON line per prompt that trips a trigger: keywords, timings, whether the
-# result was cut and how blocks were picked, and any error — the hook's stderr
+# One JSON line per prompt that trips a trigger: keywords, timings, how many
+# hits were listed and how they were picked, and any error — the hook's stderr
 # goes to /dev/null, so this is the only trace. Beside work-timeline.log.
 LOG = os.path.join(
     os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude"), "scripts",
@@ -53,13 +51,16 @@ AMBIGUOUS_MARKER = "[AMBIGUOUS]"
 # Size cap for the whole additionalContext. Claude Code (checked in 2.1.284)
 # moves hook output longer than 10,000 chars to a file and the model sees only
 # a ~2KB preview. It counts JS string length (UTF-16 units), so ulen() below
-# counts the same way; the cap keeps a small margin under that limit.
+# counts the same way; the cap keeps a small margin under that limit. A
+# reading list stays far below it; the cap only guards odd input.
 CONTEXT_BUDGET = 9500
-# Rank-order policy, used only when the result is over the cap: how many
-# leading blocks per section keep their full text; the rest collapse to their
-# header line.
-MAX_FULL_THREADS = 3
-MAX_FULL_TIMELINE = 5
+# The hook lists hits instead of injecting their text: Claude reads the files
+# anyway, so the text was read twice. Rank-order picks per section; Jev, when
+# it runs, picks up to their sum from any section.
+MAX_THREADS = 4
+MAX_TIMELINE = 4
+HEADER_LEN = 200   # UTF-16 units kept of an entry's header line
+EXCERPT_LEN = 150  # ... and of its one excerpt line
 
 # Optional relevance filter: TypeSafe's Jev scores each block against the
 # prompt. Opt-in only via this recall-specific key (a generic TYPESAFE_API_KEY
@@ -228,14 +229,32 @@ def parse_items(recall_out):
     return items
 
 
-def collapse(kind, lines):
-    """Header line only; a thread block also keeps its '↳ <path>' line."""
-    keep = [lines[0]]
-    if kind == "thread":
-        keep += [ln for ln in lines if ln.lstrip().startswith("↳ ")][-1:]
-    if lines[-1] == "":
-        keep.append("")  # blank separator before the next entry
-    return keep
+# A thread file opens with its title and metadata lines (render_thread_header
+# in work-timeline-threads.py). Matched there, they only repeat the header.
+# Files not rewritten since before the header was translated keep Korean keys.
+THREAD_META_RE = re.compile(
+    r"# |- (?:slug|project|subject|branch|span|프로젝트|브랜치|기간): ")
+
+
+def clip(s, n):
+    return s if ulen(s) <= n else ucut(s, n - 1) + "…"
+
+
+def pointer(lines):
+    """A result block as a reading-list entry: its header, one excerpt line
+    and its '↳ <file>' line. A thread's excerpt is the first line of its
+    current state, which lives only in recall's index, not in the file.
+    Without one it is the first matched line past the thread file's title
+    and metadata."""
+    rest = [ln.strip() for ln in lines[1:] if ln.strip()]
+    ref = [ln for ln in rest if ln.startswith("↳ ")][-1:]
+    text = [ln for ln in rest if not ln.startswith("↳ ")]
+    if text[:1] == ["[current state]"]:
+        text = ["current state: " + ln for ln in text[1:2]]
+    text = [ln for ln in text if not THREAD_META_RE.match(ln)]
+    return ([clip(lines[0], HEADER_LEN)]
+            + ["    " + clip(ln, EXCERPT_LEN) for ln in text[:1]]
+            + ["    " + ln for ln in ref] + [""])
 
 
 def jev_scores(prompt, passages):
@@ -286,38 +305,17 @@ def log(entry):
         pass
 
 
-def footer(n_full, n_total, n_unfit, omitted, how, note, kws):
-    """omitted: {"thread": n, "timeline": n} — blocks with not even a header shown."""
-    lines = [
-        "--- recall result shortened to fit the hook output limit ---",
-        "%d of %d results are shown in full, picked by %s. Collapsed entries show "
-        "only their header line (threads keep their ↳ file path)." % (n_full, n_total, how),
-    ]
-    if n_unfit:
-        lines.append("%d picked results are collapsed because their full text did not fit."
-                     % n_unfit)
-    parts = ["%d %s" % (omitted[k], label) for k, label in
-             (("thread", "threads"), ("timeline", "timeline hits")) if omitted[k]]
-    if parts:
-        lines.append("Omitted entirely (not even a header fit): %s." % ", ".join(parts))
-    if note:
-        lines.append(note)
-    lines.append("For the full text run: python3 %s %s — or Read the ↳ thread "
-                 "file, or %s/<date>.md for a timeline entry."
-                 % (shlex.quote(RECALL), shlex.quote(" ".join(kws)), TIMELINE_DIR))
-    return "\n".join(lines)
-
-
 def shape(recall_out, prompt, kws, stats=None):
-    """Build the additionalContext for a recall result, at most CONTEXT_BUDGET
-    UTF-16 units.
+    """Build the additionalContext for a recall result: a reading list, at most
+    CONTEXT_BUDGET UTF-16 units.
 
-    A result that fits is injected exactly as printed, with no footer. Over the
-    cap, blocks picked for full text (rank order, or Jev relevance when
-    enabled) are shown whole while they fit; the others collapse to their
-    header, and a footer says how to get the full text. stats, when given,
-    receives what happened (for the log)."""
+    Each picked hit (rank order, or Jev relevance when the result has more hits
+    than rank order keeps) becomes a pointer() entry; section headers and the
+    ambiguity note stay verbatim. A footer says how many hits were left out and
+    how to list them all. stats, when given, receives what happened (for the
+    log)."""
     stats = {} if stats is None else stats
+    rerun = "python3 %s %s" % (shlex.quote(RECALL), shlex.quote(" ".join(kws)))
     # recall marks a result whose leading threads are indistinguishable. There,
     # rank 1 is wrong about half the time, so asking beats guessing — and the
     # candidates are already named, so the question can offer real options
@@ -327,34 +325,28 @@ def shape(recall_out, prompt, kws, stats=None):
             "The search could not separate the leading candidates (see the "
             "%s line below). Do NOT answer from the top hit. Ask the user which "
             "thread they mean with AskUserQuestion, using the listed candidates "
-            "as the options, then answer from the one they pick."
+            "as the options, then read and answer from the one they pick."
         ) % AMBIGUOUS_MARKER
     else:
-        directive = (
-            "If the keywords missed the mark or the result is sparse, re-run the "
-            "recall skill yourself with more precise keywords before answering."
-        )
+        directive = ("If nothing below fits, re-run with more precise keywords: %s"
+                     % rerun)
 
     head = (
         "[recall enforcement hook] This prompt was detected as a recall question "
         "about past work. Per the CLAUDE.md recall rule, do not rely on memory or "
-        "guessing; answer using the auto-run recall result below as your primary "
-        "source. Auto-extracted keywords: [%s]. %s\n\n--- recall result ---\n"
-    ) % (", ".join(kws), directive)
-    whole = head + (recall_out or "(no result)")
-    stats["cut"] = ulen(whole) > CONTEXT_BUDGET
-    if not stats["cut"]:
-        return whole
+        "guessing. Below is a reading list from the auto-run recall, not the "
+        "content: each entry is a hit's header, one excerpt line and its ↳ file. "
+        "Before answering, Read the entries that fit the question and answer from "
+        "what you read; a timeline entry's ↳ gives a line range, so Read only those "
+        "lines. Entries are ranked by keyword match, so skip ones whose header and "
+        "excerpt are off-topic. A thread's current state is not in its file; to "
+        "see all of it, run: python3 %s '<thread name>'. Auto-extracted "
+        "keywords: [%s]. %s\n\n--- recall reading list ---\n"
+    ) % (shlex.quote(RECALL), ", ".join(kws), directive)
 
     items = parse_items(recall_out)
     blocks = [i for i, (kind, _) in enumerate(items) if kind in ("thread", "timeline")]
-    limit = {"thread": MAX_FULL_THREADS, "timeline": MAX_FULL_TIMELINE}
-    # The ambiguity note names the leading threads as the options to offer, so
-    # every one of them gets full text and can be compared.
-    for kind, lines in items:
-        if kind == "text" and lines[0].startswith(AMBIGUOUS_MARKER):
-            n_tied = sum(1 for ln in lines if re.match(r"\s+\d+\. ", ln))
-            limit["thread"] = max(limit["thread"], n_tied)
+    limit = {"thread": MAX_THREADS, "timeline": MAX_TIMELINE}
     rank, seen = set(), {"thread": 0, "timeline": 0}
     for i in blocks:
         kind = items[i][0]
@@ -362,90 +354,57 @@ def shape(recall_out, prompt, kws, stats=None):
             rank.add(i)
         seen[kind] += 1
 
-    # Only a result that needs cutting is sent to Jev.
+    # Only a result with more hits than rank order keeps is sent to Jev.
     chosen, note = rank, None
-    how = "rank order (up to the first %d threads and %d timeline hits)" % (
-        limit["thread"], limit["timeline"])
-    upgrade_order = blocks
-    t0 = time.time()
-    scores, err = jev_scores(prompt, ["\n".join(items[i][1]).rstrip("\n") for i in blocks])
-    stats["jev"] = "off"
-    if scores is not None or err:
-        stats["jev_ms"] = int((time.time() - t0) * 1000)
-    if scores is not None:
-        relevant = {i for i, s in zip(blocks, scores) if s >= JEV_KEEP}
-        if relevant:
-            chosen, how = relevant, "Jev relevance (score >= %s)" % JEV_KEEP
-            # Jev usually picks more than fits; the most relevant get full text first.
+    how = "rank order (the first %d threads and %d timeline hits)" % (
+        MAX_THREADS, MAX_TIMELINE)
+    if len(blocks) > len(rank):
+        t0 = time.time()
+        scores, err = jev_scores(prompt, ["\n".join(items[i][1]).rstrip("\n") for i in blocks])
+        stats["jev"] = "off"
+        if scores is not None or err:
+            stats["jev_ms"] = int((time.time() - t0) * 1000)
+        if scores is not None:
             score_of = dict(zip(blocks, scores))
-            upgrade_order = sorted(blocks, key=lambda i: -score_of[i])
-            stats["jev"] = "picked"
-        else:
-            note = "(Jev marked no result relevant; used rank order.)"
-            stats["jev"] = "none relevant"
-    elif err:
-        note = "(Jev relevance check failed: %s; used rank order.)" % err
-        stats["jev"] = "failed: " + err
-
-    # Budget: verbatim text and a worst-case footer are fixed. Chosen blocks get
-    # their collapsed form first, then full text in order (rank, or Jev score
-    # when Jev picked); the first one that does not fit ends the upgrades in its
-    # section, so a lower-ranked (or lower-scored) block
-    # never gets full text ahead of it. The remaining blocks then get their
-    # collapsed form in order, and trailing ones that no longer fit are dropped.
-    def cost(lines):
-        return sum(ulen(ln) + 1 for ln in lines)
-
-    n = len(blocks)
-    tail_max = "\n\n" + footer(n, n, n, {"thread": n, "timeline": n}, how, note, kws)
-    room = (CONTEXT_BUDGET - ulen(head) - ulen(tail_max)
-            - sum(cost(lines) for kind, lines in items if kind == "text"))
-    short = {i: collapse(*items[i]) for i in blocks}
-    shown = {}
-    for i in blocks:
-        if i in chosen and cost(short[i]) <= room:
-            shown[i] = short[i]
-            room -= cost(short[i])
-    stopped = set()
-    for i in upgrade_order:
-        kind, lines = items[i]
-        if i not in shown or kind in stopped:
-            continue
-        extra = cost(lines) - cost(short[i])
-        if extra > room:
-            stopped.add(kind)
-            continue
-        shown[i] = lines
-        room -= extra
-    for i in blocks:
-        if i in shown:
-            continue
-        if cost(short[i]) > room:
-            break
-        shown[i] = short[i]
-        room -= cost(short[i])
+            relevant = sorted((i for i in blocks if score_of[i] >= JEV_KEEP),
+                              key=lambda i: -score_of[i])
+            if relevant:
+                chosen = set(relevant[:MAX_THREADS + MAX_TIMELINE])
+                how = "Jev relevance (score >= %s, highest %d)" % (
+                    JEV_KEEP, MAX_THREADS + MAX_TIMELINE)
+                stats["jev"] = "picked"
+            else:
+                note = "(Jev marked no result relevant; used rank order.)"
+                stats["jev"] = "none relevant"
+        elif err:
+            note = "(Jev relevance check failed: %s; used rank order.)" % err
+            stats["jev"] = "failed: " + err
+    # The ambiguity note names the leading threads as the options to offer, so
+    # each of them keeps its entry.
+    for kind, lines in items:
+        if kind == "text" and lines[0].startswith(AMBIGUOUS_MARKER):
+            n_tied = sum(1 for ln in lines if re.match(r"\s+\d+\. ", ln))
+            chosen = chosen | set([i for i in blocks if items[i][0] == "thread"][:n_tied])
 
     out = []
     for i, (kind, lines) in enumerate(items):
-        out += lines if kind == "text" else shown.get(i, [])
-    body = "\n".join(out).rstrip()
-    full = {i for i in shown if shown[i] == items[i][1]}
-    stats["full"], stats["total"] = len(full), n
+        if kind == "text":
+            out += lines
+        elif i in chosen:
+            out += pointer(lines)
+    body = "\n".join(out).rstrip() or "(no result)"
+    stats["listed"], stats["total"] = len(chosen), len(blocks)
     tail = ""
-    if len(full) < n:
-        # A picked block left out entirely counts as omitted, not also as collapsed.
-        unfit = (chosen & set(shown)) - full
-        omitted = {"thread": 0, "timeline": 0}
-        for i in blocks:
-            if i not in shown:
-                omitted[items[i][0]] += 1
-        tail = "\n\n" + footer(len(full), n, len(unfit), omitted, how, note, kws)
-    # Last resort, only reachable if the verbatim text (or a pasted, very long
-    # keyword echoed in head and footer) alone exceeds the budget. Dropping
-    # `over` chars removes at least `over` UTF-16 units.
+    if len(chosen) < len(blocks):
+        tail = ("\n\n%d of %d results are listed, picked by %s. To list them all, "
+                "run: %s" % (len(chosen), len(blocks), how, rerun))
+        if note:
+            tail += "\n" + note
+    # Last resort for odd input (a pasted, very long keyword echoed in head and
+    # footer, a huge error message): keep the end, which says how to rerun.
     over = ulen(head) + ulen(body) + ulen(tail) - CONTEXT_BUDGET
     if over > 0:
-        body = body[:max(0, len(body) - over - 1)] + "…"
+        body = ucut(body, max(0, ulen(body) - over - 1)) + "…"
     return ucut(head + body + tail, CONTEXT_BUDGET)
 
 

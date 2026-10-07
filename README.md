@@ -30,7 +30,7 @@ This tool turns those raw transcripts into something you can actually recall:
 | `work-timeline-threads.py` | Stitches related work across days into "threads". |
 | `work-timeline-consolidate.py` | Consolidates/cleans the accumulated logs. |
 | `skills/recall` | A Claude Code **skill**: searches the timeline first, drills into raw transcripts only when an exact phrase/error is needed. |
-| `recall-gate.py` | A `UserPromptSubmit` hook that auto-runs `recall` when your prompt looks like a recall question (English + Korean triggers) and injects the result into context. |
+| `recall-gate.py` | A `UserPromptSubmit` hook that auto-runs `recall` when your prompt looks like a recall question (English + Korean triggers) and injects a reading list of the hits (header, excerpt, file and line range) into context. |
 
 The timeline and the recall skill use the **`claude` CLI** (`claude -p`) for summaries,
 so summarization runs on your own Claude account.
@@ -155,30 +155,30 @@ python3 "$R/recall.py" "openssl" --raw --since 2026-06-01
 
 `R` above is the plugin install; with `install.sh` it is `~/.claude/skills/recall`.
 
-Claude Code moves hook output longer than 10,000 characters to a file and shows
-Claude only a short preview, so the auto-injected result is capped at 9,500
-(counted the way Claude Code counts, where an emoji is 2). A result that fits is
-injected unchanged. A longer one is shortened: up to the first 3 work threads and
-first 5 timeline hits (every candidate thread, when recall flags the top threads
-as ambiguous) are shown in full, in rank order while they fit: once one doesn't
-fit, the lower-ranked ones in that section are not shown in full either. The rest
-collapse to their `●` header line (threads keep their `↳` file path). The picked
-entries get the space first; the other entries' headers fill what is left, and the
-ones that no longer fit are dropped with a per-section count. A footer then tells
-Claude how many results are shown in full and how to get the rest: rerun
-`recall.py` with the same keywords, or read the `↳` thread file or
-`~/.claude/work-timeline/<date>.md`.
+The hook injects a reading list, not the result text: Claude opened the timeline
+and thread files after almost every injection anyway, so full text was read
+twice. Each entry is the hit's `●` header line, one excerpt line and its `↳`
+file. A timeline entry's `↳` also gives the entry's line range, so Claude can
+Read just those lines. A thread's excerpt is the first line of its current
+state, which is kept in `threads/_registry.json` rather than the thread file;
+`recall.py` prints all of it. A thread with no current state gets its first
+matching line below the file's title and metadata instead. The list holds the first 4 work threads and first 4
+timeline hits (plus every candidate thread when recall flags the top threads as
+ambiguous), and a footer gives the rerun command for the rest. Claude Code moves
+hook output over 10,000 characters to a file, so the list is also capped at 9,500
+(counted the way Claude Code counts, where an emoji is 2); a normal list is a few
+thousand.
 
 ### Optional: Jev relevance filter
 
 Instead of rank order, the gate can ask TypeSafe's [Jev](https://docs.typesafe.ai/models)
 model which result blocks actually answer your prompt: at most one request per
-auto-recall, sent only when the result needs shortening, with one yes/no relevance
-question per block. Blocks Jev scores at 0.3 or higher are picked for full text in
-place of the first 3 threads / 5 timeline hits (a deliberately low bar: Jev is less
-accurate on non-English text, and missing a relevant block costs more than keeping
-an extra one). The 9,500 cap still applies, and so does the in-section
-stop: once a picked block doesn't fit, the picked ones after it stay collapsed.
+auto-recall, sent only when there are more hits than rank order lists, with one
+yes/no relevance question per block. The highest 8 of the blocks Jev scores at 0.3
+or higher are listed in place of the first 4 threads / 4 timeline hits (a
+deliberately low bar: Jev is less accurate on non-English text, and missing a
+relevant block costs more than keeping an extra one). Candidate threads of an
+ambiguous result stay listed either way.
 
 It is opt-in. Set `CCRECALL_TYPESAFE_API_KEY` where hooks can see it, e.g. in
 `settings.json`:
@@ -199,12 +199,12 @@ order and notes it in the footer. Read *Privacy & secrets* before enabling it.
 The hook's errors go to `/dev/null`, so the gate keeps its own log:
 `~/.claude/scripts/recall-gate.log`, one JSON line per prompt that trips a
 trigger. It records the start of the prompt, the keywords, recall's run time and
-result length (plus why recall failed to run, if it did), and whether the result
-was cut. A prompt with no keywords to search is logged as skipped, without
-running recall. A cut result also records how many blocks are shown in full and
-Jev's outcome (`picked`, `none relevant`, `failed: <reason>`, or `off` with no
-key), plus its run time when a request was sent. A crash in the gate gets a line
-of its own.
+result length (plus why recall failed to run, if it did), and how many of the
+hits were listed. A prompt with no keywords to search is logged as skipped,
+without running recall. When there were more hits than rank order lists, the line
+also records Jev's outcome (`picked`, `none relevant`, `failed: <reason>`, or
+`off` with no key), plus its run time when a request was sent. A crash in the
+gate gets a line of its own.
 
 ## ⚠️ Privacy & secrets
 

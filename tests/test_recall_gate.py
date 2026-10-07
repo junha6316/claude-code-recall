@@ -8,7 +8,6 @@ import importlib.util
 import io
 import json
 import os
-import re
 import shlex
 import shutil
 import socket
@@ -41,7 +40,7 @@ RERUN = "python3 %s %s" % (shlex.quote(gate.RECALL), shlex.quote("fargate cost")
 
 
 def setUpModule():
-    # gate.run()마다 로그가 남으니 실제 설정 폴더 대신 임시 폴더에 쓴다.
+    # Every gate.run() writes a log line; send them to a temp dir, not the real config dir.
     log_dir = tempfile.mkdtemp()
     unittest.addModuleCleanup(shutil.rmtree, log_dir)
     p = mock.patch.object(gate, "LOG", os.path.join(log_dir, "scripts", "recall-gate.log"))
@@ -50,20 +49,21 @@ def setUpModule():
 
 
 def recall_output(n_threads, n_timeline, lines_per=4, line_len=100, tied=False,
-                  heading_len=0, thread_line_lens=None):
+                  heading_len=0):
     threads = [{
         "name": "thread-%02d" % i,
         # Halving scores keep rank 2 well outside the 20% ambiguity margin.
         "w": 10.0 if tied else 100.0 / (2 ** i),
         "d": 2, "t": 5, "last_date": "2026-09-%02d" % (i + 1), "via": set(),
         "current_state": "state of thread %02d" % i if i % 2 else None,
-        "lines": ["T%02d-%d " % (i, j) + "x" * (thread_line_lens[i] if thread_line_lens else line_len)
-                  for j in range(lines_per)],
+        "lines": ["T%02d-%d " % (i, j) + "x" * line_len for j in range(lines_per)],
         "path": "/home/u/.claude/work-timeline/threads/thread-%02d.md" % i,
     } for i in range(n_threads)]
     timeline = [(1.0, 2, 3, "2026-08-%02d" % (i % 28 + 1),
                  "10:00 project-%03d %s" % (i, "h" * heading_len),
-                 ["L%03d-%d " % (i, j) + "y" * line_len for j in range(lines_per)])
+                 ["L%03d-%d " % (i, j) + "y" * line_len for j in range(lines_per)],
+                 ("/home/u/.claude/work-timeline/2026-08-%02d.md" % (i % 28 + 1),
+                  (10 * i + 1, 10 * i + 8)))
                 for i in range(n_timeline)]
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -73,29 +73,29 @@ def recall_output(n_threads, n_timeline, lines_per=4, line_len=100, tied=False,
 
 
 def medium():
-    """12 blocks, just over the cap: shaping kicks in, but 8 full blocks fit."""
-    out = recall_output(6, 6, lines_per=4, line_len=180)
-    assert gate.ulen(out) > gate.CONTEXT_BUDGET
-    return out
+    """12 blocks: more than rank order keeps (4 threads + 4 timeline hits)."""
+    return recall_output(6, 6, lines_per=4, line_len=180)
 
 
 def blocks_of(out):
-    """(kind, text) of each result block, as the gate parses them."""
-    return [(k, "\n".join(lines).rstrip("\n"))
-            for k, lines in gate.parse_items(out) if k in ("thread", "timeline")]
+    """(kind, lines) of each result block, as the gate parses them."""
+    return [(k, lines) for k, lines in gate.parse_items(out) if k in ("thread", "timeline")]
 
 
-def is_full(ctx, text):
-    return text in ctx
+def listed(ctx, lines):
+    """A listed block: its header, one excerpt line and ↳ line are present, its
+    other lines are not. The excerpt is clipped at EXCERPT_LEN, so compare the
+    first 100 chars."""
+    body = [ln.strip() for ln in lines[1:] if ln.strip() and ln.strip() != "[current state]"]
+    refs = [ln for ln in body if ln.startswith("↳ ")]
+    text = [ln for ln in body if not ln.startswith("↳ ")]
+    return (lines[0] in ctx and all(r in ctx for r in refs)
+            and (not text or text[0][:100] in ctx)
+            and all(ln[:100] not in ctx for ln in text[1:]))
 
 
-def is_collapsed(ctx, kind, text):
-    """Header (+ ↳ path for threads) present, the block's own content lines absent."""
-    lines = text.split("\n")
-    kept = [lines[0]] + ([lines[-1]] if kind == "thread" else [])
-    body = lines[1:-1] if kind == "thread" else lines[1:]
-    own = [ln for ln in body if ln.strip() != "[current state]"]  # shared by blocks
-    return all(ln in ctx for ln in kept) and all(ln not in ctx for ln in own)
+def absent(ctx, lines):
+    return lines[0] not in ctx
 
 
 class JevMock:
@@ -156,7 +156,7 @@ class TriggerTest(unittest.TestCase):
             self.assertIsNone(gate.run({"prompt": "add a dark mode toggle to settings"}))
             run.assert_not_called()
 
-    def test_run_injects_capped_context(self):
+    def test_run_injects_reading_list(self):
         big = recall_output(15, 15, lines_per=8, line_len=180)
         self.assertGreater(gate.ulen(big), gate.CONTEXT_BUDGET)
         fake = mock.Mock(stdout=big + "\n")
@@ -165,7 +165,8 @@ class TriggerTest(unittest.TestCase):
             out = gate.run({"prompt": PROMPT})
         ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
         self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
-        self.assertIn("--- recall result shortened", ctx)
+        self.assertIn("--- recall reading list ---", ctx)
+        self.assertIn("8 of 30 results are listed", ctx)
 
     def assert_skipped(self, prompt):
         with mock.patch.object(gate.subprocess, "run") as run:
@@ -194,7 +195,7 @@ class TriggerTest(unittest.TestCase):
         self.assert_skipped('<pasted_content id="c40b">\n지난번에 이어서 CTranslate2 '
                             '최적화를 한다.\n</pasted_content id="c40b">\n')
         # Cut off before its closing tag: still pasted text to the end.
-        self.assert_skipped('크레딧을 줬대\n<pasted_content id="90d7">\n'
+        self.assert_skipped('they gave us credits\n<pasted_content id="90d7">\n'
                             'as we discussed last time')
 
     def test_before_doing_is_not_a_recall_cue(self):
@@ -204,7 +205,7 @@ class TriggerTest(unittest.TestCase):
         self.assertEqual(self.recall_query("며칠 전에 fargate 비용 확인"), "며칠 fargate 비용 확인")
 
     def test_paste_dropped_from_keywords(self):
-        q = self.recall_query('<pasted_content id="64db">\nAWS access key 평문 노출\n'
+        q = self.recall_query('<pasted_content id="64db">\nAWS access key leaked in plain text\n'
                               '</pasted_content id="64db">\n\n faster pymysql 기억나?')
         self.assertEqual(q, "faster pymysql")
 
@@ -225,155 +226,130 @@ class ShapeTest(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def test_small_result_unchanged(self):
+    def test_lists_header_one_excerpt_and_file_instead_of_text(self):
         out = recall_output(2, 3)
         ctx = gate.shape(out, PROMPT, KWS)
         self.assertTrue(ctx.startswith("[recall enforcement hook]"))
-        self.assertTrue(ctx.endswith("--- recall result ---\n" + out))
-        self.assertNotIn("shortened", ctx)
+        self.assertIn("--- recall reading list ---", ctx)
+        for _, lines in blocks_of(out):
+            self.assertTrue(listed(ctx, lines), lines)
+        # Everything is listed, so there is no footer.
+        self.assertNotIn("results are listed", ctx)
 
-    def test_empty_result_unchanged(self):
+    def test_thread_excerpt_is_first_line_of_current_state(self):
+        ctx = gate.shape(recall_output(2, 0), PROMPT, KWS)
+        self.assertIn("    current state: state of thread 01\n", ctx)
+        self.assertIn("    T00-0 ", ctx)  # no current state: the first matched line
+        self.assertNotIn("    T01-0 ", ctx)
+
+    def test_thread_without_state_skips_file_header_metadata(self):
+        # The thread file's title and slug/metadata lines come back as matched lines
+        # too, but they only repeat the header.
+        thread = {"name": "Fargate cost", "w": 1.0, "d": 1, "t": 2, "last_date": "2026-09-22",
+                  "via": set(), "current_state": None,
+                  # Files written before the header switched to English keep Korean keys.
+                  "lines": ["# Fargate cost", "- slug: `fargate-cost`", "- subject: fargate",
+                            "- 프로젝트: fargate-infra", "- 브랜치: `fargate-spot`",
+                            "- 기간: 2026-06-25  · 세션 1개",
+                            "- `13:14` [infra] cut fargate cost"],
+                  "path": "/home/u/.claude/work-timeline/threads/fargate-cost.md"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            recall.print_thread_hits([thread], TERMS)
+        ctx = gate.shape(buf.getvalue().strip(), PROMPT, KWS)
+        self.assertIn("    - `13:14` [infra] cut fargate cost\n    ↳ ", ctx)
+        for meta in ("# Fargate cost", "- slug: ", "- subject: ", "- 프로젝트: ", "- 브랜치: ",
+                     "- 기간: "):
+            self.assertNotIn(meta, ctx)
+
+    def test_current_state_that_looks_like_metadata_is_still_the_excerpt(self):
+        # The current state is not the file header, so it stays even if it starts with '# '.
+        thread = {"name": "Fargate cost", "w": 1.0, "d": 1, "t": 2, "last_date": "2026-09-22",
+                  "via": set(), "current_state": "# Fargate cost notes",
+                  "lines": ["- `13:14` [infra] cut fargate cost"],
+                  "path": "/home/u/.claude/work-timeline/threads/fargate-cost.md"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            recall.print_thread_hits([thread], TERMS)
+        ctx = gate.shape(buf.getvalue().strip(), PROMPT, KWS)
+        self.assertIn("    current state: # Fargate cost notes\n    ↳ ", ctx)
+        self.assertNotIn("current state: - `13:14`", ctx)
+
+    def test_timeline_entry_gives_file_and_line_range(self):
+        ctx = gate.shape(recall_output(0, 2), PROMPT, KWS)
+        self.assertIn("    ↳ /home/u/.claude/work-timeline/2026-08-01.md (lines 1-8)", ctx)
+        self.assertIn("    ↳ /home/u/.claude/work-timeline/2026-08-02.md (lines 11-18)", ctx)
+
+    def test_empty_result_says_no_result(self):
         ctx = gate.shape("", PROMPT, KWS)
-        self.assertTrue(ctx.endswith("--- recall result ---\n(no result)"))
+        self.assertTrue(ctx.endswith("--- recall reading list ---\n(no result)"))
 
-    def test_under_budget_unchanged(self):
-        # More blocks than the rank policy keeps, but the whole result fits:
-        # nothing is collapsed.
-        out = recall_output(5, 7, lines_per=2, line_len=40)
+    def test_rank_order_lists_4_threads_and_4_timeline_hits(self):
+        out = recall_output(15, 15, lines_per=8, line_len=180)
         ctx = gate.shape(out, PROMPT, KWS)
-        self.assertTrue(ctx.endswith("--- recall result ---\n" + out))
-        self.assertNotIn("shortened", ctx)
-
-    def test_emoji_counts_as_two_units(self):
-        # Claude Code counts an emoji ("🧠 Daily Summary") as 2 units, len() as 1.
-        # This result fits by len() but not by UTF-16 units, so it must be shaped.
-        out = recall_output(2, 12, lines_per=4, line_len=100).replace("y" * 100, "🧠" * 100)
-        head = gate.shape("", PROMPT, KWS)[:-len("(no result)")]
-        self.assertLessEqual(len(head) + len(out), gate.CONTEXT_BUDGET)
-        self.assertGreater(gate.ulen(head + out), gate.CONTEXT_BUDGET)
-        ctx = gate.shape(out, PROMPT, KWS)
-        self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
-        self.assertIn("shortened", ctx)
-
-    def test_footer_counts_add_up(self):
-        # A huge ambiguity note leaves no room: picked blocks that are left out
-        # entirely must be counted once (omitted), not also as collapsed.
-        out = recall_output(5, 0, lines_per=2, line_len=40, tied=True)
-        start = out.index(gate.AMBIGUOUS_MARKER)
-        out = out[:start] + gate.AMBIGUOUS_MARKER + " " + "n" * 8600 + out[start + len(gate.AMBIGUOUS_MARKER):]
-        ctx = gate.shape(out, PROMPT, KWS)
-        self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
-        counts = re.search(r"(\d+) of (\d+) results are shown in full", ctx)
-        assert counts is not None, ctx
-        full, total = map(int, counts.groups())
-        m = re.search(r"(\d+) picked results are collapsed", ctx)
-        collapsed = int(m.group(1)) if m else 0
-        m = re.search(r"Omitted entirely \(not even a header fit\): (.*)\.", ctx)
-        omitted = sum(int(x) for x in re.findall(r"\d+", m.group(1))) if m else 0
-        self.assertEqual(total, 5)
-        self.assertLessEqual(full + collapsed + omitted, total)
-
-    def test_large_result_capped(self):
-        out = recall_output(15, 15, lines_per=4, line_len=110)
-        self.assertGreater(gate.ulen(out), gate.CONTEXT_BUDGET)
-        ctx = gate.shape(out, PROMPT, KWS)
-        self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
-        blocks = blocks_of(out)
-        threads = [t for k, t in blocks if k == "thread"]
-        timeline = [t for k, t in blocks if k == "timeline"]
-        for t in threads[:3] + timeline[:5]:
-            self.assertTrue(is_full(ctx, t), t)
-        for t in threads[3:]:
-            self.assertTrue(is_collapsed(ctx, "thread", t), t)
-            self.assertIn("↳ ", t.split("\n")[-1])
+        threads = [ln for k, ln in blocks_of(out) if k == "thread"]
+        timeline = [ln for k, ln in blocks_of(out) if k == "timeline"]
+        for lines in threads[:4] + timeline[:4]:
+            self.assertTrue(listed(ctx, lines), lines)
+        for lines in threads[4:] + timeline[4:]:
+            self.assertTrue(absent(ctx, lines), lines)
         # Section headers stay, in their original order.
         self.assertLess(ctx.index("=== Work threads"), ctx.index("=== Timeline search results"))
-        self.assertIn(RERUN, ctx)
-        self.assertIn(gate.TIMELINE_DIR + "/<date>.md", ctx)
-        self.assertIn("Collapsed entries show only their header line", ctx)
+        self.assertIn("8 of 30 results are listed, picked by rank order", ctx)
+        self.assertIn("To list them all, run: " + RERUN, ctx)
+        self.assertLessEqual(gate.ulen(ctx), 4000)
 
-    def test_full_text_before_trailing_headers(self):
-        # All 8 rank slots fit only if lower-ranked headers give way.
-        out = recall_output(15, 15, lines_per=6, line_len=110)
+    def test_long_header_and_excerpt_are_clipped(self):
+        out = recall_output(0, 1, lines_per=1, line_len=500, heading_len=500)
         ctx = gate.shape(out, PROMPT, KWS)
-        self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
-        blocks = blocks_of(out)
-        threads = [t for k, t in blocks if k == "thread"]
-        timeline = [t for k, t in blocks if k == "timeline"]
-        for t in threads[:3] + timeline[:5]:
-            self.assertTrue(is_full(ctx, t), t)
-        self.assertIn("8 of 30 results are shown in full", ctx)
-        self.assertRegex(ctx, r"Omitted entirely \(not even a header fit\): \d+ ")
-        self.assertNotIn("picked results are collapsed", ctx)
+        header = next(ln for ln in ctx.split("\n") if ln.startswith("● "))
+        excerpt = next(ln for ln in ctx.split("\n") if ln.startswith("    L000-0 "))
+        self.assertEqual(gate.ulen(header), gate.HEADER_LEN)
+        self.assertTrue(header.endswith("…"))
+        self.assertEqual(gate.ulen(excerpt), 4 + gate.EXCERPT_LEN)
 
-    def test_rank_order_kept_when_budget_tight(self):
-        # Thread 1 cannot fit in full after thread 0; the small thread 2 must
-        # not jump ahead of it. The timeline section is ranked on its own.
-        out = recall_output(4, 2, lines_per=1, line_len=40,
-                            thread_line_lens=[4500, 4200, 100, 100])
-        ctx = gate.shape(out, PROMPT, KWS)
-        self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
-        blocks = blocks_of(out)
-        threads = [t for k, t in blocks if k == "thread"]
-        timeline = [t for k, t in blocks if k == "timeline"]
-        self.assertTrue(is_full(ctx, threads[0]))
-        for t in threads[1:]:
-            self.assertTrue(is_collapsed(ctx, "thread", t), t)
-        for t in timeline:
-            self.assertTrue(is_full(ctx, t), t)
-        self.assertIn("2 picked results are collapsed because their full text did not fit.", ctx)
-
-    def test_single_block_over_budget(self):
-        out = recall_output(1, 0, lines_per=1, thread_line_lens=[12000])
-        ctx = gate.shape(out, PROMPT, KWS)
-        self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
-        thread = blocks_of(out)[0][1]
-        self.assertTrue(is_collapsed(ctx, "thread", thread))
-        self.assertIn("0 of 1 results are shown in full", ctx)
-        self.assertIn("1 picked results are collapsed because their full text did not fit.", ctx)
-        self.assertIn(RERUN, ctx)
+    def test_clip_counts_emoji_as_two_units(self):
+        s = gate.clip("🧠" * 100, 11)
+        self.assertLessEqual(gate.ulen(s), 11)
+        self.assertTrue(s.endswith("…"))
+        self.assertEqual(gate.clip("🧠" * 5, 10), "🧠" * 5)
 
     def test_rerun_command_is_shell_quoted(self):
-        kws = ["$HOME", "설정"]
-        ctx = gate.shape(medium(), "$HOME 설정 전에 어떻게 했지?", kws)
-        line = next(ln for ln in ctx.split("\n") if ln.startswith("For the full text run: "))
-        cmd = line[len("For the full text run: "):line.index(" — ")]
+        kws = ["$HOME", "settings"]
+        ctx = gate.shape(medium(), "how did I change $HOME settings earlier?", kws)
+        line = next(ln for ln in ctx.split("\n") if "To list them all, run: " in ln)
+        cmd = line.split("To list them all, run: ", 1)[1]
         self.assertTrue(cmd.startswith("python3 "), cmd)
         # Let a real shell parse the arguments, so $HOME expansion would show.
         argv = subprocess.run(["sh", "-c", "printf '%s\\n' " + cmd[len("python3 "):]],
                               capture_output=True, text=True).stdout.split("\n")[:-1]
-        self.assertEqual(argv, [gate.RECALL, "$HOME 설정"])
+        self.assertEqual(argv, [gate.RECALL, "$HOME settings"])
 
     def test_cap_holds_with_huge_keyword(self):
         # A pasted blob (token, hash) can become a keyword; head and footer echo it.
-        kws = ["a" * 9000]
-        ctx = gate.shape(medium(), PROMPT, kws)
+        ctx = gate.shape(medium(), PROMPT, ["a" * 9000])
         self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
 
-    def test_overflow_drops_trailing_blocks(self):
-        out = recall_output(15, 200, lines_per=2, line_len=50, heading_len=60)
+    def test_rerun_hint_at_end_survives_overflow(self):
+        out = recall_output(15, 15, tied=True)
+        start = out.index(gate.AMBIGUOUS_MARKER)
+        out = (out[:start] + gate.AMBIGUOUS_MARKER + " " + "n" * 9000
+               + out[start + len(gate.AMBIGUOUS_MARKER):])
         ctx = gate.shape(out, PROMPT, KWS)
         self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
-        blocks = blocks_of(out)
-        self.assertIn(blocks[0][1].split("\n")[0], ctx)
-        self.assertNotIn(blocks[-1][1].split("\n")[0], ctx)
-        self.assertRegex(ctx, r"Omitted entirely \(not even a header fit\): \d+ ")
-        self.assertIn(RERUN, ctx)
+        self.assertTrue(ctx.endswith("To list them all, run: " + RERUN), ctx[-300:])
 
-    def test_ambiguity_note_kept_verbatim(self):
+    def test_ambiguity_note_kept_and_all_candidates_listed(self):
         out = recall_output(15, 15, lines_per=6, line_len=110, tied=True)
         start = out.index(gate.AMBIGUOUS_MARKER)
         note = out[start:out.index("\n\n", start)]
         self.assertIn("  4. thread-03", note)
         ctx = gate.shape(out, PROMPT, KWS)
-        self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
         self.assertIn(note, ctx)
         self.assertIn("AskUserQuestion", ctx)
-        # All 4 candidates the note offers get full text, not just the first 3.
-        threads = [t for k, t in blocks_of(out) if k == "thread"]
-        for t in threads[:4]:
-            self.assertTrue(is_full(ctx, t), t)
-        self.assertIn("up to the first 4 threads", ctx)
+        threads = [ln for k, ln in blocks_of(out) if k == "thread"]
+        for lines in threads[:4]:
+            self.assertTrue(listed(ctx, lines), lines)
 
 
 class JevTest(unittest.TestCase):
@@ -395,14 +371,14 @@ class JevTest(unittest.TestCase):
         return mock_
 
     def assert_rank_order(self, ctx, out):
-        threads = [t for k, t in blocks_of(out) if k == "thread"]
-        for t in threads[:3]:
-            self.assertTrue(is_full(ctx, t), t)
-        for t in threads[3:]:
-            self.assertTrue(is_collapsed(ctx, "thread", t), t)
+        threads = [ln for k, ln in blocks_of(out) if k == "thread"]
+        for lines in threads[:4]:
+            self.assertTrue(listed(ctx, lines), lines)
+        for lines in threads[4:]:
+            self.assertTrue(absent(ctx, lines), lines)
         self.assertIn("picked by rank order", ctx)
 
-    def test_request_shape_and_selection(self):
+    def test_one_request_and_only_blocks_over_threshold_listed(self):
         jev = self.use(scored({"b1": 0.9, "b4": 0.8, "b5": 0.3, "b6": 0.29, "b8": 0.5}))
         out = medium()
         prompt = PROMPT + " " + "z" * 3000
@@ -417,35 +393,37 @@ class JevTest(unittest.TestCase):
         self.assertEqual(body["state"], {"user_question": prompt[:2000]})
         blocks = blocks_of(out)
         self.assertEqual(sorted(body["questions"]), sorted("b%d" % n for n in range(len(blocks))))
-        for n, (_, text) in enumerate(blocks):
+        for n, (_, lines) in enumerate(blocks):
             q = body["questions"]["b%d" % n]
             self.assertEqual(q["type"], "noul")
-            self.assertEqual(q["instructions"]["passage"], text)
+            self.assertEqual(q["instructions"]["passage"], "\n".join(lines).rstrip("\n"))
             self.assertEqual(q["instructions"]["question"], gate.JEV_QUESTION)
             self.assertEqual(set(q["criteria"]), {"true", "false"})
-        # b0..b5 are threads, b6..b11 timeline hits; >= 0.3 gets full text.
-        for n, (kind, text) in enumerate(blocks):
+        # b0..b5 are threads, b6..b11 timeline hits; only >= 0.3 is listed.
+        for n, (_, lines) in enumerate(blocks):
             if n in (1, 4, 5, 8):
-                self.assertTrue(is_full(ctx, text), text)
+                self.assertTrue(listed(ctx, lines), lines)
             else:
-                self.assertTrue(is_collapsed(ctx, kind, text), text)
-        self.assertIn("4 of 12 results are shown in full, picked by Jev relevance", ctx)
-        self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
+                self.assertTrue(absent(ctx, lines), lines)
+        self.assertIn("4 of 12 results are listed, picked by Jev relevance", ctx)
 
-    def test_jev_fills_by_score_when_budget_tight(self):
-        # Room for three: b1-b3 outscore b0, so rank 1 (b0) is the one collapsed.
-        self.use(scored({"b0": 0.35, "b1": 0.95, "b2": 0.9, "b3": 0.85}))
-        p = mock.patch.object(gate, "CONTEXT_BUDGET", 4200)
-        p.start()
-        self.addCleanup(p.stop)
+    def test_only_top_8_by_score_when_many_pass(self):
+        scores = {"b%d" % n: 0.4 + n * 0.05 for n in range(12)}  # b4..b11 are the top 8
+        self.use(scored(scores))
         out = medium()
         ctx = gate.shape(out, PROMPT, KWS)
-        self.assertLessEqual(gate.ulen(ctx), gate.CONTEXT_BUDGET)
-        threads = [t for k, t in blocks_of(out) if k == "thread"]
-        for t in threads[1:4]:
-            self.assertTrue(is_full(ctx, t), t)
-        self.assertTrue(is_collapsed(ctx, "thread", threads[0]))
-        self.assertIn("3 of 12 results are shown in full, picked by Jev relevance", ctx)
+        for n, (_, lines) in enumerate(blocks_of(out)):
+            self.assertTrue(listed(ctx, lines) if n >= 4 else absent(ctx, lines), lines)
+        self.assertIn("8 of 12 results are listed", ctx)
+
+    def test_ambiguous_candidates_kept_even_if_jev_drops_them(self):
+        self.use(scored({"b6": 0.9}))
+        out = recall_output(6, 6, tied=True)
+        ctx = gate.shape(out, PROMPT, KWS)
+        blocks = blocks_of(out)
+        for n, (_, lines) in enumerate(blocks):
+            self.assertTrue(listed(ctx, lines) if n in (0, 1, 2, 3, 6) else absent(ctx, lines),
+                            lines)
 
     def test_zero_relevant_falls_back_to_rank(self):
         jev = self.use(scored({}))
@@ -503,12 +481,13 @@ class JevTest(unittest.TestCase):
         self.assert_rank_order(ctx, out)
         self.assertNotIn("Jev", ctx)
 
-    def test_small_result_makes_no_request(self):
+    def test_no_request_when_rank_order_lists_everything(self):
         jev = self.use(scored({}))
-        out = recall_output(2, 3)
+        out = recall_output(4, 4)
         ctx = gate.shape(out, PROMPT, KWS)
         self.assertEqual(jev.requests, [])
-        self.assertTrue(ctx.endswith("--- recall result ---\n" + out))
+        for _, lines in blocks_of(out):
+            self.assertTrue(listed(ctx, lines), lines)
 
 
 class LogTest(unittest.TestCase):
@@ -536,11 +515,11 @@ class LogTest(unittest.TestCase):
                                   return_value=mock.Mock(stdout=recall_out + "\n")):
             return gate.run({"prompt": PROMPT})
 
-    def test_트리거가_없으면_기록하지_않는다(self):
+    def test_no_trigger_no_log_line(self):
         gate.run({"prompt": "add a dark mode toggle to settings"})
         self.assertEqual(self.entries(), [])
 
-    def test_한도_안의_결과도_한_줄_기록한다(self):
+    def test_logs_one_line_when_everything_is_listed(self):
         out = recall_output(2, 3)
         self.run_gate(out)
         [e] = self.entries()
@@ -548,22 +527,22 @@ class LogTest(unittest.TestCase):
         self.assertEqual(e["kws"], gate.extract_keywords(PROMPT))
         self.assertEqual(e["result_len"], gate.ulen(out))
         self.assertIsInstance(e["recall_ms"], int)
-        self.assertFalse(e["cut"])
+        self.assertEqual((e["listed"], e["total"]), (5, 5))
         self.assertNotIn("jev", e)
 
-    def test_줄인_결과는_고른_방식을_기록한다(self):
+    def test_logs_how_hits_were_picked(self):
         env = self.jev_env(scored({"b1": 0.9, "b4": 0.8}))
         ctx = json.loads(self.run_gate(medium(), env))["hookSpecificOutput"]["additionalContext"]
         [e] = self.entries()
-        self.assertTrue(e["cut"])
         self.assertEqual(e["jev"], "picked")
         self.assertIsInstance(e["jev_ms"], int)
-        self.assertIn("%d of %d results are shown in full" % (e["full"], e["total"]), ctx)
+        self.assertEqual((e["listed"], e["total"]), (2, 12))
+        self.assertIn("2 of 12 results are listed", ctx)
 
-    def test_Jev_결과별로_기록한다(self):
+    def test_logs_each_jev_outcome(self):
         self.run_gate(medium(), self.jev_env(scored({})))
         self.run_gate(medium(), self.jev_env(lambda body: (500, b"{}")))
-        self.run_gate(medium())  # 키 없음: 요청하지 않는다
+        self.run_gate(medium())  # no key: no request
         none, failed, off = self.entries()
         self.assertEqual(none["jev"], "none relevant")
         self.assertEqual(failed["jev"], "failed: HTTP 500")
@@ -572,20 +551,21 @@ class LogTest(unittest.TestCase):
         self.assertIsInstance(failed["jev_ms"], int)
         self.assertNotIn("jev_ms", off)
 
-    def test_키워드가_없어도_기록한다(self):
+    def test_logs_prompt_without_keywords(self):
         self.assertIsNone(gate.run({"prompt": "그때 그거 기억나?"}))
         [e] = self.entries()
         self.assertEqual(e["skip"], "no keywords")
 
-    def test_recall_실행_실패를_기록한다(self):
+    def test_logs_recall_run_failure(self):
         with mock.patch.dict(os.environ, env_without_key(), clear=True), \
                 mock.patch.object(gate.subprocess, "run", side_effect=OSError("boom")):
             self.assertIsNotNone(gate.run({"prompt": PROMPT}))
         [e] = self.entries()
         self.assertEqual(e["recall_err"], "boom")
 
-    def test_짝_없는_서로게이트도_기록하고_주입한다(self):
-        # JS 문자열에서 온 "\ud800"은 UTF-8로 못 쓴다. 기록이 막혀도 주입은 돼야 한다.
+    def test_lone_surrogate_is_logged_and_injected(self):
+        # A "\ud800" from a JS string cannot be written as UTF-8; injection must work
+        # even if logging fails.
         prompt = PROMPT + " \ud800"
         with mock.patch.dict(os.environ, env_without_key(), clear=True), \
                 mock.patch.object(gate.subprocess, "run", return_value=mock.Mock(stdout="")):
@@ -593,7 +573,7 @@ class LogTest(unittest.TestCase):
         [e] = self.entries()
         self.assertEqual(e["prompt"], prompt)
 
-    def test_기록할_수_없어도_주입은_된다(self):
+    def test_injects_even_when_log_cannot_be_written(self):
         blocker = os.path.join(os.path.dirname(gate.LOG), "not-a-dir")
         os.makedirs(os.path.dirname(blocker), exist_ok=True)
         open(blocker, "w").close()
@@ -601,7 +581,7 @@ class LogTest(unittest.TestCase):
         with mock.patch.object(gate, "LOG", os.path.join(blocker, "recall-gate.log")):
             self.assertIsNotNone(self.run_gate(recall_output(2, 3)))
 
-    def test_예외가_나도_출력은_없고_기록은_남는다(self):
+    def test_exception_prints_nothing_but_logs(self):
         out = io.StringIO()
         with mock.patch.object(gate, "run", side_effect=RuntimeError("bad")), \
                 mock.patch.object(gate.sys, "stdin", io.StringIO("{}")), \

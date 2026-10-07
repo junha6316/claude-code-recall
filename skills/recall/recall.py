@@ -167,9 +167,24 @@ def split_blocks(content):
     return blocks
 
 
+def block_spans(content):
+    """1-based (first, last) file line of each block split_blocks() returns, in
+    the same order, or None when the two disagree. Counted on "\\n" so the
+    numbers match Read and sed; splitlines() also breaks on characters such as
+    U+2028, which can start an extra block."""
+    lines = content.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # the file's final newline does not start a line
+    starts = [i + 1 for i, ln in enumerate(lines) if ln.startswith("## ")]
+    if len(starts) != len(split_blocks(content)):
+        return None
+    ends = [s - 1 for s in starts[1:]] + [len(lines)]
+    return list(zip(starts, ends))
+
+
 def search_timeline(terms, limit):
     # Collect blocks first: term weights need the whole corpus before scoring.
-    blocks = []  # (date, heading, body, body_lower)
+    blocks = []  # (date, heading, body, body_lower, loc)
     for path in sorted(glob.glob(os.path.join(TIMELINE_DIR, "[0-9]" * 4 + "-*.md"))):
         date = os.path.splitext(os.path.basename(path))[0]
         try:
@@ -177,16 +192,18 @@ def search_timeline(terms, limit):
                 content = f.read()
         except OSError:
             continue
-        for heading, body in split_blocks(content):
-            blocks.append((date, heading, body, body.lower()))
+        parts = split_blocks(content)
+        spans = block_spans(content) or [None] * len(parts)
+        for (heading, body), span in zip(parts, spans):
+            blocks.append((date, heading, body, body.lower(), (path, span)))
 
     weights = term_weights(terms, [b[3] for b in blocks])
-    hits = []  # (weighted, distinct, total, date, heading, lines)
-    for date, heading, body, body_lower in blocks:
+    hits = []  # (weighted, distinct, total, date, heading, lines, (path, span))
+    for date, heading, body, body_lower, loc in blocks:
         w, d, t = score_weighted(body_lower, terms, weights)
         if d == 0:
             continue
-        hits.append((w, d, t, date, heading, matched_lines(body, terms)))
+        hits.append((w, d, t, date, heading, matched_lines(body, terms), loc))
     hits.sort(key=lambda h: (h[0], h[2], h[3]), reverse=True)
     return hits[:limit]
 
@@ -196,10 +213,11 @@ def print_timeline_hits(hits, terms):
         print("No matches in the timeline. Try --raw to search raw conversations, or change your keywords.")
         return
     print("=== Timeline search results (%d hits, query: %s) ===\n" % (len(hits), " ".join(terms)))
-    for _w, d, t, date, heading, lines in hits:
+    for _w, d, t, date, heading, lines, (path, span) in hits:
         print("● [%s] %s   (%d/%d terms matched, %d occurrences)" % (date, heading, d, len(terms), t))
         for ln in lines:
             print("    %s" % ln)
+        print("    ↳ %s%s" % (path, " (lines %d-%d)" % span if span else ""))
         print()
 
 
