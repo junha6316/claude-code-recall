@@ -13,6 +13,7 @@ import sys
 import os
 import re
 import json
+import importlib.util
 import shlex
 import subprocess
 import time
@@ -37,6 +38,11 @@ def _find_recall():
 
 
 RECALL = _find_recall()
+# Loaded by path (skills/recall is not a package) so the gate picks keywords
+# with recall's own stopwords, particle stripping and term cap.
+_spec = importlib.util.spec_from_file_location("ccrecall_recall", RECALL)
+_recall = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_recall)
 # One JSON line per prompt that trips a trigger: keywords, timings, how many
 # hits were listed and how they were picked, and any error — the hook's stderr
 # goes to /dev/null, so this is the only trace. Beside work-timeline.log.
@@ -44,9 +50,7 @@ LOG = os.path.join(
     os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude"), "scripts",
     "recall-gate.log")
 
-# Kept in sync with recall.py's marker (the gate reads recall's stdout, so it
-# cannot import it — recall.py lives in a skills/ dir that is not a package).
-AMBIGUOUS_MARKER = "[AMBIGUOUS]"
+AMBIGUOUS_MARKER = _recall.AMBIGUOUS_MARKER
 
 # Size cap for the whole additionalContext. Claude Code (checked in 2.1.284)
 # moves hook output longer than 10,000 chars to a file and the model sees only
@@ -98,33 +102,29 @@ TRIGGERS = [
     r"when did i",
     r"when did we",
     r"last time",
-    r"remember when",
+    # "remember" only as a question: "Remember, we use pnpm" or "remember to
+    # add tests" are instructions about now.
+    r"\b(?:do|can|could|don['’]t) you remember\b",
+    r"\bremember (?:when|how|what|where|why|which)\b",
+    r"^\s*remember\b(?!\s+to\b)[^\n]*\?",
     r"did (?:i|we)",
     r"how did (?:i|we)",
     r"\bpreviously\b",
     r"\bearlier\b",
     r"used to",
     r"that .* (?:error|bug|issue)",
+    # Not "10 minutes ago" ("it worked 10 minutes ago"), which is the current
+    # task, nor an NRQL time range ("SINCE 7 days ago", "UNTIL yesterday",
+    # "COMPARE WITH 1 week ago").
+    r"(?<!since )(?<!until )(?<!compare with )\b\w+ (?:days?|weeks?|months?|years?) ago\b",
+    r"\ba while ago\b",
+    r"(?<!since )(?<!until )\byesterday\b",
+    r"(?<!since )(?<!until )\blast (?:week|month|year|sprint|night)\b",
 ]
 TRIG_RE = re.compile("|".join(TRIGGERS), re.IGNORECASE)
 
-# Stopwords to exclude from keywords (triggers, pronouns, common verb stems).
-STOP = {
-    # Korean
-    "기억해", "기억", "기억나", "전에", "예전", "지난번", "저번", "그때", "언제",
-    "했지", "했어", "했던", "했었", "하던", "만들던", "만들던거", "만들", "하던거",
-    "그거", "그게", "이거", "저거", "내가", "우리", "그", "좀", "해줘", "했나",
-    "뭐", "뭐였지", "어떻게", "왜", "거", "것", "건", "때", "줘", "해", "나", "수",
-    # English (extract_keywords lowercases latin tokens)
-    "the", "a", "when", "did", "how", "what", "was",
-}
-
-# Strip trailing Korean particles/endings.
-# Longer endings come first so "관련해서" strips to "관련" rather than stalling.
-JOSA = re.compile(
-    r"(을|를|이|가|은|는|에|의|로|으로|도|만|와|과|랑|이랑|에서|까지|부터"
-    r"|해서|해야|하는|한|던거|던|거|게|야|냐|니|네|좀|했|하)+$"
-)
+STOP = _recall.STOP
+JOSA = _recall.JOSA
 
 
 # Prompts that are actually system/harness wrappers, not the user asking something
@@ -165,7 +165,7 @@ def _last_segment(m):
 
 def extract_keywords(prompt):
     prompt = LOCATOR_RE.sub(_last_segment, prompt)
-    raw = re.split(r"[\s,.;:!?()\[\]{}<>'\"`~/\\|=&]+", prompt)
+    raw = re.split(r"[\s,.;:!?()\[\]{}<>'’\"`~/\\|=&]+", prompt)
     kws = []
     for tok in raw:
         if not tok:
@@ -188,7 +188,7 @@ def extract_keywords(prompt):
         if k not in seen:
             seen.add(k)
             out.append(k)
-    return out[:4]
+    return out[:_recall.MAX_TERMS]
 
 
 def ulen(s):

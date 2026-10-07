@@ -219,6 +219,55 @@ class TriggerTest(unittest.TestCase):
         # Only a token that starts as a URL or path; a slash inside a word stays a split.
         self.assertEqual(kw("dev/qa env-on 기억나?"), ["dev", "qa", "env-on"])
 
+    def test_english_recall_questions_trigger_and_keep_topic_words(self):
+        cases = {
+            "do you remember when we set up the fargate autoscaling?":
+                ["set", "up", "fargate", "autoscaling"],
+            "remember the redis timeout fix?": ["redis", "timeout", "fix"],
+            "Remember how we sharded the users table?": ["sharded", "users", "table"],
+            "I can't remember how we sharded the users table": ["sharded", "users", "table"],
+            "what did we decide about the auth migration last time?":
+                ["decide", "auth", "migration"],
+            "how did I fix the openssl regression before?": ["fix", "openssl", "regression"],
+            "we worked on sentry alerts a while ago, what happened?":
+                ["worked", "sentry", "alerts"],
+            "the deploy script from two weeks ago, where is it?": ["deploy", "script", "two"],
+            "what broke in yesterday's release?": ["broke", "release"],
+            "the flaky test from last week, how did we handle it?": ["flaky", "test", "handle"],
+            # Contractions split at the apostrophe; their stems are not topic words.
+            "why wasn't the cron job running last week?": ["cron", "job", "running"],
+            "the redis fix from several weeks ago, isn't it in main?": ["redis", "fix", "main"],
+            "we changed the billing job a year ago, why?": ["changed", "billing", "job"],
+            # A typographic apostrophe, as pasted from docs or chat apps.
+            "don’t you remember the redis timeout fix?": ["redis", "timeout", "fix"],
+            # "recall" is a topic word (this tool, precision/recall), not phrasing.
+            "do you remember the recall gate log format?": ["recall", "gate", "log", "format"],
+        }
+        for prompt, kws in cases.items():
+            self.assertTrue(gate.TRIG_RE.search(prompt), prompt)
+            self.assertEqual(gate.extract_keywords(prompt), kws, prompt)
+
+    def test_english_instructions_do_not_trigger(self):
+        for prompt in ("remember to run the tests before you commit",
+                       "remember to update the changelog too, ok?",
+                       "Remember, we use pnpm not npm.",
+                       "remember: keep the API backward compatible",
+                       "Please remember that the config lives in /etc/app",
+                       "this worked 10 minutes ago, now it fails",
+                       "before you deploy, check the config",
+                       # NRQL time ranges, pasted to run or explain a query.
+                       "SELECT count(*) FROM Transaction SINCE 7 days ago",
+                       "SELECT count(*) FROM Transaction SINCE last week UNTIL yesterday",
+                       "SELECT count(*) FROM Transaction SINCE 2 weeks ago UNTIL 1 week ago",
+                       "SELECT count(*) FROM Transaction SINCE 1 day ago COMPARE WITH 1 week ago"):
+            self.assertIsNone(gate.TRIG_RE.search(prompt), prompt)
+
+    def test_keywords_capped_at_recalls_term_limit(self):
+        # Topic words past the old cap of 4 used to be dropped.
+        kws = gate.extract_keywords("remember the stripe webhook signature retry backoff jitter bug?")
+        self.assertEqual(kws, ["stripe", "webhook", "signature", "retry", "backoff", "jitter"])
+        self.assertEqual(len(kws), recall.MAX_TERMS)
+
 
 class ShapeTest(unittest.TestCase):
     def setUp(self):

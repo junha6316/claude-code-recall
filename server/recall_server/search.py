@@ -40,6 +40,16 @@ STOP = {
     # English
     "the", "a", "an", "when", "did", "do", "how", "what", "was", "were", "is",
     "are", "i", "we", "you", "that", "this", "it", "there", "about", "for",
+    "me", "my", "our", "us", "of", "to", "in", "on", "at", "with", "and", "or",
+    "but", "so", "if", "can", "could", "would", "should", "will", "have", "has",
+    "had", "be", "been", "does", "done", "didn", "don", "any", "some", "where",
+    "which", "who", "why", "still", "just", "back", "ever", "again", "used",
+    "remember", "before", "earlier", "previously", "ago", "while", "last",
+    "time", "yesterday", "night", "day", "days", "week", "weeks", "month",
+    "months", "year", "years", "few", "several", "couple", "happened", "from",
+    # What is left of "wasn't" or "we've" once the apostrophe splits it.
+    "doesn", "isn", "wasn", "aren", "weren", "haven", "hasn", "hadn", "couldn",
+    "wouldn", "shouldn", "ve", "ll", "re",
 }
 
 JOSA = re.compile(

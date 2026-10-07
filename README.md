@@ -145,7 +145,9 @@ Only tagged releases reach installs — pushing to `main` alone does not notify 
 ## Using recall
 
 Just ask Claude naturally — *"when did I work on X?"*, *"what was that error last
-time?"* — and the hook runs `recall` for you. Or run it directly:
+time?"*, *"do you remember the redis timeout fix?"* — and the hook runs `recall`
+for you. The hook recognizes English and Korean phrasing; in other languages, ask
+Claude to use the recall skill. Or run it directly:
 
 ```bash
 R=~/.claude/plugins/cache/claude-code-recall/claude-code-recall/<version>/skills/recall
